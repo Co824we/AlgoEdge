@@ -1,4 +1,3 @@
-
 import io
 import re
 from dataclasses import dataclass
@@ -12,7 +11,8 @@ import streamlit as st
 
 # ============================================================
 # ALGO Edge Performance History
-# Portfolio + Strategy Monte Carlo
+# Portfolio balance history + individual strategy analysis
+# Sit-out overlay + Monte Carlo projections
 # ============================================================
 
 st.set_page_config(
@@ -22,23 +22,25 @@ st.set_page_config(
 )
 
 st.title("ALGO Edge Performance History")
-st.caption("Portfolio balance-history analysis, individual strategy analysis, sit-out overlays, and Monte Carlo projections.")
+st.caption(
+    "Portfolio balance-history analysis, individual strategy analysis, sit-out overlays, and Monte Carlo projections."
+)
 
 st.markdown(
     """
-This build supports the broker-style portfolio balance-history export with columns like
-`Date`, `NLV`, `Day_PL`, `Day_PL_Percent`, `Deposits/Withdrawals`, and `AllTime_PL_Percent`.
+This app supports both:
 
-It also preserves individual strategy analysis for CSVs with a date column and either a
-strategy column, balance column, return column, or P/L column.
+1. **Portfolio balance-history CSVs** with columns like `Date`, `NLV`, `Day_PL`, `Day_PL_Percent`, and `Deposits/Withdrawals`.
+2. **Individual strategy CSVs** with a date column and either balance, return, or P/L columns. If a `Strategy` column exists, the app lets you analyze each strategy separately.
+
+For sit-out testing, the model treats the sit-out period as cash: returns are set to **0%** during the selected window, then normal compounding resumes.
 """
 )
 
 
-# ------------------------------------------------------------
+# -----------------------------
 # Column detection
-# ------------------------------------------------------------
-
+# -----------------------------
 DATE_CANDIDATES = [
     "date", "Date", "DATE", "datetime", "Datetime", "timestamp", "Timestamp",
     "time", "Time", "close_time", "Close Time", "Trade Date", "trade_date",
@@ -48,8 +50,10 @@ DATE_CANDIDATES = [
 BALANCE_CANDIDATES = [
     "NLV", "nlv", "Net Liquidation Value", "net liquidation value",
     "NetLiq", "netliq", "net_liq", "Net Liq", "NetLiquidation", "Net Liquidation",
-    "balance", "Balance", "BALANCE", "equity", "Equity", "account_value", "Account Value",
-    "value", "Value", "cumulative_balance", "Cumulative Balance", "ending_balance", "Ending Balance",
+    "balance", "Balance", "BALANCE", "equity", "Equity",
+    "account_value", "Account Value", "AccountValue",
+    "value", "Value", "cumulative_balance", "Cumulative Balance",
+    "ending_balance", "Ending Balance", "ending_value", "Ending Value",
 ]
 
 DAY_PNL_CANDIDATES = [
@@ -58,60 +62,57 @@ DAY_PNL_CANDIDATES = [
 ]
 
 CASHFLOW_CANDIDATES = [
-    "Deposits/Withdrawals", "deposits/withdrawals", "Deposits Withdrawals",
-    "Deposit/Withdrawal", "deposit/withdrawal", "Cash Flow", "cash_flow",
-    "CashFlow", "Net Deposits", "net_deposits", "Deposits", "deposits",
-    "Withdrawals", "withdrawals",
+    "Deposits/Withdrawals", "deposits/withdrawals",
+    "Deposits Withdrawals", "deposits withdrawals",
+    "Deposit/Withdrawal", "deposit/withdrawal",
+    "Cash Flow", "cash_flow", "CashFlow", "Net Deposits", "net_deposits",
+    "Deposits", "deposits", "Withdrawals", "withdrawals",
 ]
 
 RETURN_CANDIDATES = [
-    "return", "Return", "returns", "Returns", "daily_return", "Daily Return",
-    "pct_return", "Pct Return", "% Return", "percent_return", "Percent Return",
-    "Day_PL_Percent", "day_pl_percent", "Day P/L Percent", "Daily P/L Percent",
-    "Daily PL Percent",
-]
-
-ALLTIME_PCT_CANDIDATES = [
-    "AllTime_PL_Percent", "AllTime P/L Percent", "AllTime PL Percent",
-    "All Time P/L Percent", "All Time PL Percent", "AllTime Percent",
-]
-
-ALLTIME_PL_CANDIDATES = [
-    "AllTime_PL", "AllTime P/L", "AllTime PL", "All Time P/L", "All Time PL",
+    "return", "Return", "returns", "Returns",
+    "daily_return", "Daily Return",
+    "pct_return", "Pct Return", "% Return",
+    "percent_return", "Percent Return",
+    "Day_PL_Percent", "day_pl_percent",
+    "Day P/L Percent", "Daily P/L Percent", "Daily PL Percent",
 ]
 
 PNL_CANDIDATES = [
-    "pnl", "PnL", "P/L", "p/l", "profit", "Profit", "daily_pnl", "Daily PnL",
-    "net_profit", "Net Profit", "Net P/L", "Realized P/L", "realized_pnl",
-    "Realized PnL", "Trade P/L", "Trade PL", "trade_pnl",
+    "pnl", "PnL", "P/L", "p/l",
+    "profit", "Profit", "daily_pnl", "Daily PnL",
+    "net_profit", "Net Profit", "Net P/L",
+    "Realized P/L", "realized_pnl", "Realized PnL",
+    "Trade P/L", "Trade PL", "trade_pnl",
 ]
 
 STRATEGY_CANDIDATES = [
-    "strategy", "Strategy", "STRATEGY", "system", "System", "setup", "Setup",
-    "algo", "Algo", "name", "Name",
+    "strategy", "Strategy", "STRATEGY",
+    "system", "System",
+    "setup", "Setup",
+    "algo", "Algo",
+    "name", "Name",
 ]
 
 
 @dataclass
-class Scope:
-    label: str
-    kind: str
-    source_file: str
-    data: pd.DataFrame
+class ParsedData:
+    scopes: Dict[str, pd.DataFrame]
     notes: List[str]
+    preview: pd.DataFrame
 
 
-def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
+def _clean_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
 
-def normalize_col_name(value: str) -> str:
+def _normalize_col_name(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
 
 
-def find_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+def _find_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     exact = {c: c for c in df.columns}
     lower = {c.lower(): c for c in df.columns}
 
@@ -121,15 +122,16 @@ def find_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
         if candidate.lower() in lower:
             return lower[candidate.lower()]
 
-    normalized_candidates = [normalize_col_name(c) for c in candidates]
+    normalized_candidates = [_normalize_col_name(c) for c in candidates]
     for col in df.columns:
-        normalized_col = normalize_col_name(col)
+        normalized_col = _normalize_col_name(col)
         for candidate in normalized_candidates:
-            if candidate and normalized_col == candidate:
+            if candidate and candidate == normalized_col:
                 return col
 
+    # Fuzzy fallback for broker exports like "Account Balance ($)".
     for col in df.columns:
-        normalized_col = normalize_col_name(col)
+        normalized_col = _normalize_col_name(col)
         for candidate in normalized_candidates:
             if candidate and candidate in normalized_col:
                 return col
@@ -137,16 +139,12 @@ def find_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     return None
 
 
-def to_numeric(series) -> pd.Series:
-    if isinstance(series, (int, float)):
-        return pd.Series(series)
-
-    s = pd.Series(series)
-    if pd.api.types.is_numeric_dtype(s):
-        return pd.to_numeric(s, errors="coerce")
+def _to_numeric(series: pd.Series) -> pd.Series:
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce")
 
     return pd.to_numeric(
-        s.astype(str)
+        series.astype(str)
         .str.replace("$", "", regex=False)
         .str.replace(",", "", regex=False)
         .str.replace("%", "", regex=False)
@@ -157,7 +155,7 @@ def to_numeric(series) -> pd.Series:
     )
 
 
-def read_csv(uploaded_file) -> pd.DataFrame:
+def _read_uploaded_csv(uploaded_file) -> pd.DataFrame:
     content = uploaded_file.getvalue()
     try:
         return pd.read_csv(io.BytesIO(content))
@@ -165,444 +163,539 @@ def read_csv(uploaded_file) -> pd.DataFrame:
         return pd.read_csv(io.BytesIO(content), engine="python")
 
 
-def safe_stem(filename: str) -> str:
-    stem = str(filename).split("/")[-1].split("\\")[-1].rsplit(".", 1)[0]
+def _safe_file_stem(filename: str) -> str:
+    stem = str(filename).rsplit("/", 1)[-1].rsplit("\\", 1)[-1].rsplit(".", 1)[0]
     return stem.replace("_", " ").replace("-", " ").strip() or "Uploaded File"
 
 
-def dedupe(label: str, existing: Dict[str, Scope]) -> str:
+def _dedupe_label(label: str, existing: Dict[str, pd.DataFrame]) -> str:
     if label not in existing:
         return label
+
     i = 2
     while f"{label} ({i})" in existing:
         i += 1
     return f"{label} ({i})"
 
 
-def normalize_return_column(series: pd.Series, column_name: str = "") -> pd.Series:
-    values = to_numeric(series)
-    name = str(column_name).lower()
+def _normalize_return_series(series: pd.Series) -> pd.Series:
+    values = _to_numeric(series)
     median_abs = values.abs().median(skipna=True)
 
-    # Columns explicitly labeled percent are percentage points:
-    # 0.45 means 0.45%, not 45%.
-    if "percent" in name or "%" in name:
-        return values / 100.0
-
-    # Generic return columns may be decimals or percentages.
+    # Return columns may come in as 0.45 or 45, or as 0.45 meaning 0.45%.
+    # For common broker percent columns like Day_PL_Percent, values such as 0.45 mean 0.45%.
+    # If the median absolute value is greater than 0.5, assume percent notation.
+    # If the column contains names with "Percent", the caller handles conversion explicitly.
     if pd.notna(median_abs) and median_abs > 1:
-        return values / 100.0
+        values = values / 100.0
 
     return values
 
 
-# ------------------------------------------------------------
-# Parsing
-# ------------------------------------------------------------
+def _build_curve_from_returns_and_cashflows(
+    returns: pd.Series,
+    cashflows: pd.Series,
+    initial_balance: float,
+    sitout_mask: Optional[pd.Series] = None,
+) -> pd.Series:
+    returns = pd.Series(returns).fillna(0.0).replace([np.inf, -np.inf], 0.0).astype(float)
+    cashflows = pd.Series(cashflows).fillna(0.0).replace([np.inf, -np.inf], 0.0).astype(float)
 
-def make_portfolio_scope(
+    if sitout_mask is None:
+        sitout_mask = pd.Series(False, index=returns.index)
+    else:
+        sitout_mask = pd.Series(sitout_mask, index=returns.index).fillna(False)
+
+    balance = float(initial_balance)
+    values: List[float] = []
+
+    for i in range(len(returns)):
+        r = 0.0 if bool(sitout_mask.iloc[i]) else float(returns.iloc[i])
+        cf = float(cashflows.iloc[i])
+
+        # First balance-history row is usually the starting NLV with zero return/cashflow.
+        if i == 0 and abs(r) < 1e-15 and abs(cf) < 1e-15:
+            values.append(balance)
+            continue
+
+        balance = balance + cf + (balance * r)
+        values.append(balance)
+
+    return pd.Series(values, index=returns.index)
+
+
+def _build_scope_dataframe(
+    daily: pd.DataFrame,
+    initial_balance: float,
+    scope_label: str,
+    source_file: str,
+    source_kind: str,
+) -> pd.DataFrame:
+    daily = daily.copy().sort_values("date").reset_index(drop=True)
+    daily["date"] = pd.to_datetime(daily["date"])
+    daily["return"] = pd.to_numeric(daily["return"], errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    daily["cash_flow"] = pd.to_numeric(daily.get("cash_flow", 0.0), errors="coerce").fillna(0.0)
+    daily["balance"] = pd.to_numeric(daily["balance"], errors="coerce")
+
+    daily["model_balance"] = _build_curve_from_returns_and_cashflows(
+        daily["return"],
+        daily["cash_flow"],
+        initial_balance,
+    )
+
+    # For actual balance-history files, keep actual balance visible.
+    # For return/P&L reconstructed files, actual and model balance are generally the same.
+    daily["scope"] = scope_label
+    daily["source_file"] = source_file
+    daily["source_kind"] = source_kind
+    daily["initial_balance"] = float(initial_balance)
+
+    return daily
+
+
+def _make_scope_from_balance_file(
     df: pd.DataFrame,
     filename: str,
     date_col: str,
     balance_col: str,
-) -> Scope:
-    notes: List[str] = []
+    starting_balance_for_pnl: float,
+    strategy_col: Optional[str],
+    notes: List[str],
+) -> Dict[str, pd.DataFrame]:
+    scopes: Dict[str, pd.DataFrame] = {}
 
-    day_pnl_col = find_column(df, DAY_PNL_CANDIDATES)
-    cashflow_col = find_column(df, CASHFLOW_CANDIDATES)
-    alltime_pct_col = find_column(df, ALLTIME_PCT_CANDIDATES)
-    alltime_pl_col = find_column(df, ALLTIME_PL_CANDIDATES)
-    return_col = find_column(df, RETURN_CANDIDATES)
+    day_pnl_col = _find_column(df, DAY_PNL_CANDIDATES)
+    cashflow_col = _find_column(df, CASHFLOW_CANDIDATES)
+    return_col = _find_column(df, RETURN_CANDIDATES)
 
-    w = df.copy()
-    w["date"] = pd.to_datetime(w[date_col], errors="coerce").dt.tz_localize(None)
-    w["nlv"] = to_numeric(w[balance_col])
-    w["cash_flow"] = to_numeric(w[cashflow_col]) if cashflow_col else 0.0
-    w["day_pl"] = to_numeric(w[day_pnl_col]) if day_pnl_col else np.nan
-    w["alltime_pl"] = to_numeric(w[alltime_pl_col]) if alltime_pl_col else np.nan
-    w["alltime_pl_percent"] = to_numeric(w[alltime_pct_col]) if alltime_pct_col else np.nan
-    w["return_col_value"] = normalize_return_column(w[return_col], return_col) if return_col else np.nan
+    working = df.copy()
+    working["date"] = pd.to_datetime(working[date_col], errors="coerce").dt.tz_localize(None)
+    working["balance_value"] = _to_numeric(working[balance_col])
+    working["cash_flow_value"] = _to_numeric(working[cashflow_col]) if cashflow_col else 0.0
+    working["day_pnl_value"] = _to_numeric(working[day_pnl_col]) if day_pnl_col else np.nan
 
-    w = w.dropna(subset=["date", "nlv"]).sort_values("date").copy()
-
-    # One row per date. Cash flows and P/L are summed. NLV and cumulative metrics are last.
-    d = (
-        w.assign(_date=w["date"].dt.normalize())
-        .groupby("_date", as_index=False)
-        .agg(
-            nlv=("nlv", "last"),
-            cash_flow=("cash_flow", "sum"),
-            day_pl=("day_pl", "sum"),
-            alltime_pl=("alltime_pl", "last"),
-            alltime_pl_percent=("alltime_pl_percent", "last"),
-            return_col_value=("return_col_value", "last"),
-        )
-        .rename(columns={"_date": "date"})
-        .sort_values("date")
-        .reset_index(drop=True)
-    )
-
-    d["cum_cash_flow"] = d["cash_flow"].fillna(0.0).cumsum()
-    d["adjusted_equity"] = d["nlv"] - d["cum_cash_flow"]
-
-    # Return basis 1: adjusted equity. This removes deposits/withdrawals from the curve.
-    d["return_adjusted_equity"] = d["adjusted_equity"].pct_change().replace([np.inf, -np.inf], np.nan).fillna(0.0)
-
-    # Return basis 2: day P/L over prior adjusted equity. Similar to adjusted equity, but explicit P/L based.
-    prior_adjusted = d["adjusted_equity"].shift(1)
-    d["return_daypl_prior_adjusted_equity"] = d["day_pl"] / prior_adjusted
-    d.loc[prior_adjusted.isna() | (prior_adjusted == 0), "return_daypl_prior_adjusted_equity"] = 0.0
-    d["return_daypl_prior_adjusted_equity"] = d["return_daypl_prior_adjusted_equity"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
-
-    # Return basis 3: broker cumulative percent index if available.
-    if d["alltime_pl_percent"].notna().any():
-        broker_index = 1 + (d["alltime_pl_percent"].fillna(method="ffill").fillna(0.0) / 100.0)
-        d["return_broker_alltime_percent"] = broker_index.pct_change().replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    if return_col:
+        return_values = _to_numeric(working[return_col])
+        # Day_PL_Percent is expressed in percentage points: -0.95 means -0.95%, not -95%.
+        if "percent" in _normalize_col_name(return_col) or "%" in str(return_col):
+            return_values = return_values / 100.0
+        else:
+            return_values = _normalize_return_series(working[return_col])
+        working["return_value_from_column"] = return_values
     else:
-        d["return_broker_alltime_percent"] = np.nan
+        working["return_value_from_column"] = np.nan
 
-    # Return basis 4: day P/L over prior raw NLV. Conservative for total-account return; may look flat if NLV contains idle capital.
-    prior_nlv = d["nlv"].shift(1)
-    d["return_daypl_prior_nlv"] = d["day_pl"] / prior_nlv
-    d.loc[prior_nlv.isna() | (prior_nlv == 0), "return_daypl_prior_nlv"] = 0.0
-    d["return_daypl_prior_nlv"] = d["return_daypl_prior_nlv"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    working = working.dropna(subset=["date", "balance_value"]).copy()
+    if working.empty:
+        notes.append(f"Skipped `{filename}` because the balance column `{balance_col}` had no usable numeric values.")
+        return scopes
 
-    # Return basis 5: raw NLV pct change. Not recommended for MC because it includes deposits/withdrawals.
-    d["return_raw_nlv"] = d["nlv"].pct_change().replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    if strategy_col:
+        group_iter = working.groupby(working[strategy_col].astype(str).fillna("Unknown Strategy"))
+    else:
+        # NLV-style files are portfolio account history files.
+        balance_name = _normalize_col_name(balance_col)
+        if balance_name in ["nlv", "net liq", "net liquidation", "net liquidation value", "netliquidation"]:
+            label = "Portfolio Balance History"
+        else:
+            label = _safe_file_stem(filename)
+        group_iter = [(label, working)]
 
-    # Return basis 6: explicit return column, if available.
-    d["return_column"] = d["return_col_value"].fillna(0.0)
+    for group_name, group in group_iter:
+        group = group.sort_values("date").copy()
 
-    d["is_cashflow_day"] = d["cash_flow"].fillna(0.0).abs() > 1e-9
-    d["is_after_cashflow_day"] = d["is_cashflow_day"].shift(1).fillna(False)
-    d["is_weekday"] = pd.to_datetime(d["date"]).dt.weekday < 5
-    d["source_kind"] = "portfolio_balance_history"
-    d["source_file"] = filename
+        # Aggregate to one row per calendar date.
+        agg = {
+            "balance_value": "last",
+            "cash_flow_value": "sum",
+            "day_pnl_value": "sum",
+            "return_value_from_column": "last",
+        }
 
-    notes.append(f"Loaded `{filename}` as portfolio balance history using `{date_col}` and `{balance_col}`.")
-    if day_pnl_col:
-        notes.append(f"Detected daily P/L column `{day_pnl_col}`.")
-    if cashflow_col:
-        notes.append(f"Detected deposits/withdrawals column `{cashflow_col}`.")
-    if alltime_pct_col:
-        notes.append(f"Detected broker cumulative return column `{alltime_pct_col}`.")
-    notes.append("Default Monte Carlo basis uses adjusted equity returns and filters transfer days to avoid flat/distorted simulations.")
+        daily = (
+            group.assign(_daily_date=group["date"].dt.normalize())
+            .groupby("_daily_date", as_index=False)
+            .agg(agg)
+            .rename(columns={"_daily_date": "date"})
+        )
 
-    return Scope(
-        label="Portfolio Balance History",
-        kind="portfolio",
-        source_file=filename,
-        data=d,
-        notes=notes,
-    )
+        daily["date"] = pd.to_datetime(daily["date"])
+        daily = daily.sort_values("date").reset_index(drop=True)
+
+        prior_balance = daily["balance_value"].shift(1)
+
+        if day_pnl_col and daily["day_pnl_value"].notna().any():
+            # Best for balance-history exports because it removes deposit/withdrawal distortion.
+            daily["return"] = daily["day_pnl_value"] / prior_balance
+            daily.loc[prior_balance.isna() | (prior_balance == 0), "return"] = 0.0
+            return_source = f"`{day_pnl_col}` / prior balance"
+        elif return_col and daily["return_value_from_column"].notna().any():
+            daily["return"] = daily["return_value_from_column"].fillna(0.0)
+            return_source = f"`{return_col}`"
+        else:
+            daily["return"] = daily["balance_value"].pct_change().replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            return_source = f"percentage change in `{balance_col}`"
+
+        daily["cash_flow"] = daily["cash_flow_value"].fillna(0.0)
+        daily["balance"] = daily["balance_value"]
+
+        initial_balance = float(daily["balance"].iloc[0])
+        scope_label = str(group_name).strip() or _safe_file_stem(filename)
+        scope_label = _dedupe_label(scope_label, scopes)
+
+        scopes[scope_label] = _build_scope_dataframe(
+            daily[["date", "balance", "return", "cash_flow"]],
+            initial_balance=initial_balance,
+            scope_label=scope_label,
+            source_file=filename,
+            source_kind="balance_history",
+        )
+
+        cf_note = f" and cash-flow column `{cashflow_col}`" if cashflow_col else ""
+        notes.append(
+            f"Loaded `{filename}` as `{scope_label}` using `{date_col}`, balance column `{balance_col}`, "
+            f"returns from {return_source}{cf_note}."
+        )
+
+    return scopes
 
 
-def make_strategy_scopes(
+def _make_scope_from_return_file(
     df: pd.DataFrame,
     filename: str,
     date_col: str,
-    starting_balance: float,
-    existing: Dict[str, Scope],
-) -> Dict[str, Scope]:
-    scopes: Dict[str, Scope] = {}
-    notes: List[str] = []
+    return_col: str,
+    starting_balance_for_pnl: float,
+    strategy_col: Optional[str],
+    notes: List[str],
+) -> Dict[str, pd.DataFrame]:
+    scopes: Dict[str, pd.DataFrame] = {}
+    working = df.copy()
+    working["date"] = pd.to_datetime(working[date_col], errors="coerce").dt.tz_localize(None)
 
-    strategy_col = find_column(df, STRATEGY_CANDIDATES)
-    balance_col = find_column(df, BALANCE_CANDIDATES)
-    return_col = find_column(df, RETURN_CANDIDATES)
-    pnl_col = find_column(df, PNL_CANDIDATES)
+    returns = _to_numeric(working[return_col])
+    if "percent" in _normalize_col_name(return_col) or "%" in str(return_col):
+        returns = returns / 100.0
+    else:
+        returns = _normalize_return_series(working[return_col])
 
-    w = df.copy()
-    w["date"] = pd.to_datetime(w[date_col], errors="coerce").dt.tz_localize(None)
-    w = w.dropna(subset=["date"]).copy()
+    working["return_value"] = returns
+    working = working.dropna(subset=["date", "return_value"]).copy()
+
+    if working.empty:
+        notes.append(f"Skipped `{filename}` because return column `{return_col}` had no usable numeric values.")
+        return scopes
 
     if strategy_col:
-        w["_strategy"] = w[strategy_col].astype(str).replace("", "Unknown Strategy")
+        group_iter = working.groupby(working[strategy_col].astype(str).fillna("Unknown Strategy"))
     else:
-        w["_strategy"] = safe_stem(filename)
+        group_iter = [(_safe_file_stem(filename), working)]
 
-    if balance_col:
-        w["_balance"] = to_numeric(w[balance_col])
-    else:
-        w["_balance"] = np.nan
-
-    if return_col:
-        w["_return_col"] = normalize_return_column(w[return_col], return_col)
-    else:
-        w["_return_col"] = np.nan
-
-    if pnl_col:
-        w["_pnl"] = to_numeric(w[pnl_col])
-    else:
-        w["_pnl"] = np.nan
-
-    for strategy, group in w.groupby("_strategy"):
-        group = group.sort_values("date").copy()
-        daily = group.assign(_date=group["date"].dt.normalize()).groupby("_date", as_index=False).agg(
-            balance=("_balance", "last"),
-            return_column=("_return_col", "last"),
-            pnl=("_pnl", "sum"),
-        ).rename(columns={"_date": "date"}).sort_values("date").reset_index(drop=True)
-
-        if daily["balance"].notna().any():
-            daily["balance"] = daily["balance"].ffill()
-            daily["return_strategy"] = daily["balance"].pct_change().replace([np.inf, -np.inf], np.nan).fillna(0.0)
-            method = f"balance column `{balance_col}`"
-        elif daily["return_column"].notna().any():
-            daily["return_strategy"] = daily["return_column"].fillna(0.0)
-            daily["balance"] = starting_balance * (1 + daily["return_strategy"]).cumprod()
-            method = f"return column `{return_col}`"
-        elif daily["pnl"].notna().any():
-            daily["pnl"] = daily["pnl"].fillna(0.0)
-            daily["balance"] = starting_balance + daily["pnl"].cumsum()
-            prior_balance = daily["balance"].shift(1)
-            daily["return_strategy"] = daily["pnl"] / prior_balance
-            daily.loc[prior_balance.isna() | (prior_balance == 0), "return_strategy"] = 0.0
-            daily["return_strategy"] = daily["return_strategy"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
-            method = f"P/L column `{pnl_col}` reconstructed from starting balance"
-        else:
-            continue
-
-        daily["nlv"] = daily["balance"]
-        daily["adjusted_equity"] = daily["balance"]
-        daily["day_pl"] = daily["pnl"].fillna(0.0) if "pnl" in daily else 0.0
+    for group_name, group in group_iter:
+        sorted_group = group.sort_values("date").assign(_daily_date=group["date"].dt.normalize())
+        daily = (
+            sorted_group
+            .groupby("_daily_date", as_index=False)
+            .agg({"return_value": "last"})
+            .rename(columns={"_daily_date": "date"})
+        )
+        daily["date"] = pd.to_datetime(daily["date"])
+        daily = daily.sort_values("date").reset_index(drop=True)
+        daily["return"] = daily["return_value"].fillna(0.0)
         daily["cash_flow"] = 0.0
-        daily["cum_cash_flow"] = 0.0
-        daily["is_cashflow_day"] = False
-        daily["is_after_cashflow_day"] = False
-        daily["is_weekday"] = pd.to_datetime(daily["date"]).dt.weekday < 5
-        daily["source_kind"] = "strategy"
-        daily["source_file"] = filename
 
-        # Mirror return columns so the rest of the app can operate uniformly.
-        for col in [
-            "return_adjusted_equity",
-            "return_daypl_prior_adjusted_equity",
-            "return_broker_alltime_percent",
-            "return_daypl_prior_nlv",
-            "return_raw_nlv",
-            "return_column",
-        ]:
-            daily[col] = daily["return_strategy"]
+        balances = _build_curve_from_returns_and_cashflows(
+            daily["return"],
+            daily["cash_flow"],
+            starting_balance_for_pnl,
+        )
+        daily["balance"] = balances
 
-        label = dedupe(str(strategy).strip() or safe_stem(filename), {**existing, **scopes})
-        scopes[label] = Scope(
-            label=label,
-            kind="strategy",
+        scope_label = _dedupe_label(str(group_name).strip() or _safe_file_stem(filename), scopes)
+        scopes[scope_label] = _build_scope_dataframe(
+            daily[["date", "balance", "return", "cash_flow"]],
+            initial_balance=starting_balance_for_pnl,
+            scope_label=scope_label,
             source_file=filename,
-            data=daily,
-            notes=[f"Loaded `{filename}` as `{label}` using {method}."],
+            source_kind="return_history",
         )
 
-    # Combined strategy scope when multiple strategies are present and P/L exists.
-    if strategy_col and pnl_col and w["_pnl"].notna().any():
-        combined = w.assign(_date=w["date"].dt.normalize()).groupby("_date", as_index=False).agg(
-            pnl=("_pnl", "sum")
-        ).rename(columns={"_date": "date"}).sort_values("date").reset_index(drop=True)
-
-        combined["balance"] = starting_balance + combined["pnl"].fillna(0.0).cumsum()
-        prior_balance = combined["balance"].shift(1)
-        combined["return_strategy"] = combined["pnl"] / prior_balance
-        combined.loc[prior_balance.isna() | (prior_balance == 0), "return_strategy"] = 0.0
-        combined["return_strategy"] = combined["return_strategy"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
-
-        combined["nlv"] = combined["balance"]
-        combined["adjusted_equity"] = combined["balance"]
-        combined["day_pl"] = combined["pnl"].fillna(0.0)
-        combined["cash_flow"] = 0.0
-        combined["cum_cash_flow"] = 0.0
-        combined["is_cashflow_day"] = False
-        combined["is_after_cashflow_day"] = False
-        combined["is_weekday"] = pd.to_datetime(combined["date"]).dt.weekday < 5
-        combined["source_kind"] = "strategy_combined"
-        combined["source_file"] = filename
-
-        for col in [
-            "return_adjusted_equity",
-            "return_daypl_prior_adjusted_equity",
-            "return_broker_alltime_percent",
-            "return_daypl_prior_nlv",
-            "return_raw_nlv",
-            "return_column",
-        ]:
-            combined[col] = combined["return_strategy"]
-
-        label = dedupe("All Strategies - Combined P/L", {**existing, **scopes})
-        scopes[label] = Scope(
-            label=label,
-            kind="strategy",
-            source_file=filename,
-            data=combined,
-            notes=[f"Loaded combined strategy P/L from `{filename}` using `{pnl_col}`."],
+        notes.append(
+            f"Loaded `{filename}` as `{scope_label}` using `{date_col}` and return column `{return_col}`."
         )
 
     return scopes
 
 
-def parse_files(files, starting_balance: float) -> Dict[str, Scope]:
-    scopes: Dict[str, Scope] = {}
+def _make_scope_from_pnl_file(
+    df: pd.DataFrame,
+    filename: str,
+    date_col: str,
+    pnl_col: str,
+    starting_balance_for_pnl: float,
+    strategy_col: Optional[str],
+    notes: List[str],
+) -> Dict[str, pd.DataFrame]:
+    scopes: Dict[str, pd.DataFrame] = {}
 
-    for uploaded in files:
-        df = clean_columns(read_csv(uploaded))
-        date_col = find_column(df, DATE_CANDIDATES)
-        if not date_col:
+    working = df.copy()
+    working["date"] = pd.to_datetime(working[date_col], errors="coerce").dt.tz_localize(None)
+    working["pnl_value"] = _to_numeric(working[pnl_col])
+    working = working.dropna(subset=["date", "pnl_value"]).copy()
+
+    if working.empty:
+        notes.append(f"Skipped `{filename}` because P/L column `{pnl_col}` had no usable numeric values.")
+        return scopes
+
+    if strategy_col:
+        group_iter = working.groupby(working[strategy_col].astype(str).fillna("Unknown Strategy"))
+    else:
+        group_iter = [(_safe_file_stem(filename), working)]
+
+    # Individual strategy/file scopes.
+    for group_name, group in group_iter:
+        sorted_group = group.sort_values("date").assign(_daily_date=group["date"].dt.normalize())
+        daily = (
+            sorted_group
+            .groupby("_daily_date", as_index=False)
+            .agg({"pnl_value": "sum"})
+            .rename(columns={"_daily_date": "date"})
+        )
+        daily["date"] = pd.to_datetime(daily["date"])
+        daily = daily.sort_values("date").reset_index(drop=True)
+        daily["cash_flow"] = 0.0
+
+        balance = float(starting_balance_for_pnl)
+        balances = []
+        returns = []
+        for pnl in daily["pnl_value"].fillna(0.0):
+            r = pnl / balance if balance else 0.0
+            balance = balance + pnl
+            returns.append(r)
+            balances.append(balance)
+
+        daily["return"] = returns
+        daily["balance"] = balances
+
+        scope_label = _dedupe_label(str(group_name).strip() or _safe_file_stem(filename), scopes)
+        scopes[scope_label] = _build_scope_dataframe(
+            daily[["date", "balance", "return", "cash_flow"]],
+            initial_balance=starting_balance_for_pnl,
+            scope_label=scope_label,
+            source_file=filename,
+            source_kind="pnl_history",
+        )
+
+        notes.append(
+            f"Loaded `{filename}` as `{scope_label}` using `{date_col}` and P/L column `{pnl_col}`."
+        )
+
+    # If a Strategy column exists, also create a combined P/L scope for that file.
+    if strategy_col:
+        sorted_working = working.sort_values("date").assign(_daily_date=working["date"].dt.normalize())
+        daily_all = (
+            sorted_working
+            .groupby("_daily_date", as_index=False)
+            .agg({"pnl_value": "sum"})
+            .rename(columns={"_daily_date": "date"})
+        )
+        daily_all["date"] = pd.to_datetime(daily_all["date"])
+        daily_all = daily_all.sort_values("date").reset_index(drop=True)
+        daily_all["cash_flow"] = 0.0
+
+        balance = float(starting_balance_for_pnl)
+        balances = []
+        returns = []
+        for pnl in daily_all["pnl_value"].fillna(0.0):
+            r = pnl / balance if balance else 0.0
+            balance = balance + pnl
+            returns.append(r)
+            balances.append(balance)
+
+        daily_all["return"] = returns
+        daily_all["balance"] = balances
+
+        combined_label = _dedupe_label("All Strategies - Combined P/L", scopes)
+        scopes[combined_label] = _build_scope_dataframe(
+            daily_all[["date", "balance", "return", "cash_flow"]],
+            initial_balance=starting_balance_for_pnl,
+            scope_label=combined_label,
+            source_file=filename,
+            source_kind="combined_pnl_history",
+        )
+
+    return scopes
+
+
+def parse_uploaded_files(files, starting_balance_for_pnl: float) -> ParsedData:
+    all_scopes: Dict[str, pd.DataFrame] = {}
+    notes: List[str] = []
+    previews: List[pd.DataFrame] = []
+
+    for file in files:
+        try:
+            df = _clean_columns(_read_uploaded_csv(file))
+        except Exception as exc:
+            notes.append(f"Skipped `{file.name}` because it could not be read as a CSV: {exc}")
             continue
 
-        balance_col = find_column(df, BALANCE_CANDIDATES)
-        has_nlv = balance_col and normalize_col_name(balance_col) in {
-            "nlv", "net liq", "netliq", "net liquidation", "net liquidation value", "netliquidation"
-        }
-        has_cashflows = find_column(df, CASHFLOW_CANDIDATES) is not None
-        has_day_pl = find_column(df, DAY_PNL_CANDIDATES) is not None
+        df["__source_file"] = file.name
+        previews.append(df.head(10).copy())
 
-        # Broker portfolio files get their own special parser.
-        if has_nlv and (has_cashflows or has_day_pl):
-            scope = make_portfolio_scope(df, uploaded.name, date_col, balance_col)
-            scopes[dedupe(scope.label, scopes)] = scope
+        date_col = _find_column(df, DATE_CANDIDATES)
+        if date_col is None:
+            notes.append(f"Skipped `{file.name}` because no date column was detected.")
+            continue
 
-        # Strategy scopes are still attempted if strategy-like columns exist.
-        strategy_col = find_column(df, STRATEGY_CANDIDATES)
-        pnl_col = find_column(df, PNL_CANDIDATES)
-        return_col = find_column(df, RETURN_CANDIDATES)
+        strategy_col = _find_column(df, STRATEGY_CANDIDATES)
+        balance_col = _find_column(df, BALANCE_CANDIDATES)
+        return_col = _find_column(df, RETURN_CANDIDATES)
+        pnl_col = _find_column(df, PNL_CANDIDATES)
 
-        if strategy_col or (not has_nlv and (balance_col or pnl_col or return_col)):
-            scopes.update(make_strategy_scopes(df, uploaded.name, date_col, starting_balance, scopes))
+        # Priority matters:
+        # 1. Balance-history files with NLV/balance should be treated as balance files.
+        # 2. Return files.
+        # 3. P/L files.
+        file_scopes: Dict[str, pd.DataFrame] = {}
 
-    return scopes
+        if balance_col is not None:
+            file_scopes = _make_scope_from_balance_file(
+                df=df,
+                filename=file.name,
+                date_col=date_col,
+                balance_col=balance_col,
+                starting_balance_for_pnl=starting_balance_for_pnl,
+                strategy_col=strategy_col,
+                notes=notes,
+            )
+        elif return_col is not None:
+            file_scopes = _make_scope_from_return_file(
+                df=df,
+                filename=file.name,
+                date_col=date_col,
+                return_col=return_col,
+                starting_balance_for_pnl=starting_balance_for_pnl,
+                strategy_col=strategy_col,
+                notes=notes,
+            )
+        elif pnl_col is not None:
+            file_scopes = _make_scope_from_pnl_file(
+                df=df,
+                filename=file.name,
+                date_col=date_col,
+                pnl_col=pnl_col,
+                starting_balance_for_pnl=starting_balance_for_pnl,
+                strategy_col=strategy_col,
+                notes=notes,
+            )
+        else:
+            notes.append(
+                f"Skipped `{file.name}` because no balance, return, or P/L column was detected."
+            )
 
+        for label, scope_df in file_scopes.items():
+            safe_label = _dedupe_label(label, all_scopes)
+            if safe_label != label:
+                scope_df = scope_df.copy()
+                scope_df["scope"] = safe_label
+            all_scopes[safe_label] = scope_df
 
-# ------------------------------------------------------------
-# Analytics
-# ------------------------------------------------------------
-
-RETURN_BASIS_OPTIONS = {
-    "Adjusted equity return — removes deposits/withdrawals": "return_adjusted_equity",
-    "Day P/L ÷ prior adjusted equity": "return_daypl_prior_adjusted_equity",
-    "Broker AllTime_PL_Percent daily change": "return_broker_alltime_percent",
-    "Day P/L ÷ prior NLV — conservative total-account return": "return_daypl_prior_nlv",
-    "Raw NLV % change — includes deposits/withdrawals, not recommended for MC": "return_raw_nlv",
-    "Return column from file": "return_column",
-}
-
-
-def clean_returns(series: pd.Series) -> pd.Series:
-    return pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
-
-
-def apply_sitout(returns: pd.Series, dates: pd.Series, start_date: pd.Timestamp, months: int) -> Tuple[pd.Series, pd.Timestamp, pd.Timestamp]:
-    adjusted = clean_returns(returns).copy()
-    start = pd.Timestamp(start_date).normalize()
-    end = start + pd.DateOffset(months=months)
-    mask = (pd.to_datetime(dates) >= start) & (pd.to_datetime(dates) < end)
-    adjusted.loc[mask.values] = 0.0
-    return adjusted, start, end
-
-
-def equity_curve(returns: pd.Series, starting_value: float) -> pd.Series:
-    r = clean_returns(returns)
-    return starting_value * (1 + r).cumprod()
-
-
-def filtered_monte_carlo_returns(
-    df: pd.DataFrame,
-    return_col: str,
-    sampling_mode: str,
-    exclude_transfer_days: bool,
-    min_abs_return: float = 0.000001,
-) -> pd.Series:
-    data = df.copy()
-    r = clean_returns(data[return_col])
-    mask = pd.Series(True, index=data.index)
-
-    if sampling_mode == "Weekdays only":
-        mask &= data["is_weekday"].fillna(True).astype(bool)
-    elif sampling_mode == "Active trading days only":
-        mask &= r.abs() >= min_abs_return
-
-    if exclude_transfer_days and "is_cashflow_day" in data.columns:
-        mask &= ~data["is_cashflow_day"].fillna(False).astype(bool)
-        mask &= ~data["is_after_cashflow_day"].fillna(False).astype(bool)
-
-    out = r[mask].dropna()
-    out = out.replace([np.inf, -np.inf], np.nan).dropna()
-
-    # Always remove the first zero observation from pct_change style series.
-    if len(out) > 1 and abs(out.iloc[0]) < 1e-15:
-        out = out.iloc[1:]
-
-    return out
+    preview = pd.concat(previews, ignore_index=True) if previews else pd.DataFrame()
+    return ParsedData(scopes=all_scopes, notes=notes, preview=preview)
 
 
-def monte_carlo_paths(
-    returns: pd.Series,
-    starting_value: float,
-    years: int,
-    simulations: int,
-    sitout_months: int = 0,
-    seed: int = 42,
-) -> np.ndarray:
-    r = clean_returns(returns).dropna()
-    if len(r) < 5:
-        raise ValueError("Not enough return observations for Monte Carlo analysis after filtering.")
-
-    trading_days = int(252 * years)
-    sitout_days = int(round(21 * sitout_months))
-
-    rng = np.random.default_rng(seed)
-    sampled = rng.choice(r.values, size=(simulations, trading_days), replace=True)
-
-    if sitout_days > 0:
-        sampled[:, : min(sitout_days, trading_days)] = 0.0
-
-    return starting_value * np.cumprod(1 + sampled, axis=1)
-
-
-def path_summary(paths: np.ndarray) -> Dict[str, float]:
-    end = paths[:, -1]
-    return {
-        "p5": float(np.percentile(end, 5)),
-        "p25": float(np.percentile(end, 25)),
-        "median": float(np.percentile(end, 50)),
-        "p75": float(np.percentile(end, 75)),
-        "p95": float(np.percentile(end, 95)),
-        "mean": float(np.mean(end)),
-    }
-
-
-def summarize_return_stream(r: pd.Series) -> Dict[str, float]:
-    r = clean_returns(r).dropna()
-    if r.empty:
-        return {"count": 0, "mean": np.nan, "std": np.nan, "min": np.nan, "max": np.nan, "annualized_mean": np.nan}
-    return {
-        "count": int(len(r)),
-        "mean": float(r.mean()),
-        "std": float(r.std()),
-        "min": float(r.min()),
-        "max": float(r.max()),
-        "annualized_mean": float((1 + r.mean()) ** 252 - 1),
-    }
-
-
-def money(x) -> str:
-    if pd.isna(x):
+# -----------------------------
+# Modeling / chart helpers
+# -----------------------------
+def money(value: float) -> str:
+    if pd.isna(value):
         return "—"
-    return f"${x:,.0f}"
+    return f"${value:,.0f}"
 
 
-def pct(x) -> str:
-    if pd.isna(x):
+def pct(value: float) -> str:
+    if pd.isna(value):
         return "—"
-    return f"{x:.2%}"
+    return f"{value:.2%}"
 
 
-# ------------------------------------------------------------
-# Plotting
-# ------------------------------------------------------------
+def apply_sitout_curve(
+    daily: pd.DataFrame,
+    sitout_start: pd.Timestamp,
+    sitout_months: int,
+) -> Tuple[pd.Series, pd.Timestamp, pd.Timestamp]:
+    sitout_start = pd.Timestamp(sitout_start).normalize()
+    sitout_end = sitout_start + pd.DateOffset(months=sitout_months)
 
-def historical_overlay_chart(dates, full_curve, sitout_curve, sitout_start, sitout_end) -> go.Figure:
+    dates = pd.to_datetime(daily["date"])
+    mask = (dates >= sitout_start) & (dates < sitout_end)
+
+    curve = _build_curve_from_returns_and_cashflows(
+        daily["return"],
+        daily["cash_flow"],
+        float(daily["initial_balance"].iloc[0]),
+        sitout_mask=mask,
+    )
+
+    return curve, sitout_start, sitout_end
+
+
+def describe_gap(full_final: float, sitout_final: float) -> Tuple[str, float, float]:
+    gap = full_final - sitout_final
+    pct_gap = gap / full_final if full_final else np.nan
+
+    if gap > 0:
+        label = "Opportunity cost of sitting out"
+    elif gap < 0:
+        label = "Capital protected by sitting out"
+    else:
+        label = "No difference"
+
+    return label, gap, pct_gap
+
+
+def make_historical_overlay_chart(
+    daily: pd.DataFrame,
+    full_curve: pd.Series,
+    sitout_curve: pd.Series,
+    sitout_start: pd.Timestamp,
+    sitout_end: pd.Timestamp,
+    selected_scope: str,
+) -> go.Figure:
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=dates, y=full_curve, mode="lines", name="Full participation"))
-    fig.add_trace(go.Scatter(x=dates, y=sitout_curve, mode="lines", name="Sit-out counterfactual"))
+
+    fig.add_trace(
+        go.Scatter(
+            x=daily["date"],
+            y=full_curve,
+            mode="lines",
+            name="Full Participation",
+            hovertemplate="%{x|%Y-%m-%d}<br>$%{y:,.0f}<extra></extra>",
+        )
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=daily["date"],
+            y=sitout_curve,
+            mode="lines",
+            name="Sit Out",
+            hovertemplate="%{x|%Y-%m-%d}<br>$%{y:,.0f}<extra></extra>",
+        )
+    )
+
+    if "balance" in daily.columns and daily["source_kind"].iloc[0] == "balance_history":
+        fig.add_trace(
+            go.Scatter(
+                x=daily["date"],
+                y=daily["balance"],
+                mode="lines",
+                name="Actual Reported Balance",
+                line=dict(dash="dot"),
+                hovertemplate="%{x|%Y-%m-%d}<br>$%{y:,.0f}<extra></extra>",
+            )
+        )
+
     fig.add_vrect(
         x0=sitout_start,
         x1=sitout_end,
@@ -612,354 +705,741 @@ def historical_overlay_chart(dates, full_curve, sitout_curve, sitout_start, sito
         annotation_text="Sit-out period",
         annotation_position="top left",
     )
+
     fig.update_layout(
-        title="Historical Overlay: Full Participation vs. Sitting Out",
+        title=f"Historical Overlay: {selected_scope}",
         xaxis_title="Date",
-        yaxis_title="Modeled Account Value",
+        yaxis_title="Account / Strategy Value",
         hovermode="x unified",
+        legend_title_text="Scenario",
         margin=dict(l=20, r=20, t=60, b=20),
     )
+
     return fig
 
 
-def projection_chart(paths_full, paths_sit, last_date, years, sitout_months) -> go.Figure:
-    dates = pd.bdate_range(pd.Timestamp(last_date) + pd.offsets.BDay(1), periods=paths_full.shape[1])
-    p_full = {
-        "p5": np.percentile(paths_full, 5, axis=0),
-        "p50": np.percentile(paths_full, 50, axis=0),
-        "p95": np.percentile(paths_full, 95, axis=0),
-    }
-    p_sit = {
-        "p50": np.percentile(paths_sit, 50, axis=0),
+def monte_carlo_paths(
+    historical_returns: pd.Series,
+    starting_balance: float,
+    years: int,
+    simulations: int,
+    sitout_months: int = 0,
+    seed: int = 42,
+) -> np.ndarray:
+    clean_returns = (
+        pd.Series(historical_returns)
+        .dropna()
+        .replace([np.inf, -np.inf], np.nan)
+        .dropna()
+        .astype(float)
+    )
+
+    if clean_returns.empty:
+        raise ValueError("No valid historical returns are available for projection.")
+
+    trading_days = int(252 * years)
+    sitout_days = int(round(21 * sitout_months))
+
+    rng = np.random.default_rng(seed)
+    sampled = rng.choice(clean_returns.values, size=(simulations, trading_days), replace=True)
+
+    if sitout_days > 0:
+        sampled[:, : min(sitout_days, trading_days)] = 0.0
+
+    return starting_balance * np.cumprod(1 + sampled, axis=1)
+
+
+def summarize_paths(paths: np.ndarray) -> pd.DataFrame:
+    percentiles = [5, 25, 50, 75, 95]
+    values = np.percentile(paths, percentiles, axis=0)
+    return pd.DataFrame({f"p{p}": values[i] for i, p in enumerate(percentiles)})
+
+
+def final_stats(paths: np.ndarray) -> Dict[str, float]:
+    ending = paths[:, -1]
+    return {
+        "p5": float(np.percentile(ending, 5)),
+        "p25": float(np.percentile(ending, 25)),
+        "median": float(np.percentile(ending, 50)),
+        "p75": float(np.percentile(ending, 75)),
+        "p95": float(np.percentile(ending, 95)),
+        "mean": float(np.mean(ending)),
     }
 
+
+def _smooth_density(values: np.ndarray, points: int = 240) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Lightweight Gaussian KDE so the app does not need scipy.
+    Returns x-grid and normalized density for ending-value distribution curves.
+    """
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size < 3:
+        return values, np.zeros_like(values)
+
+    low, high = np.percentile(values, [0.5, 99.5])
+    if low == high:
+        low, high = values.min(), values.max()
+    if low == high:
+        low, high = low * 0.95, high * 1.05 + 1
+
+    grid = np.linspace(low, high, points)
+    std = np.std(values, ddof=1)
+    bandwidth = 1.06 * std * (values.size ** (-1 / 5)) if std > 0 else max(abs(high - low) / 30, 1.0)
+    bandwidth = max(bandwidth, max(abs(high - low) / 500, 1.0))
+
+    z = (grid[:, None] - values[None, :]) / bandwidth
+    density = np.exp(-0.5 * z * z).sum(axis=1) / (values.size * bandwidth * np.sqrt(2 * np.pi))
+    return grid, density
+
+
+def make_projection_chart(
+    full_paths: np.ndarray,
+    sitout_paths: np.ndarray,
+    years: int,
+    sitout_months: int,
+    selected_scope: str,
+    current_balance: float,
+    sample_paths: int = 80,
+    seed: int = 42,
+) -> go.Figure:
+    """
+    Classic Monte Carlo visualization:
+    - faint individual paths
+    - 5th-95th percentile cone
+    - 25th-75th percentile inner cone
+    - median full-participation path
+    - dashed sit-out median path
+    - current balance reference line
+    """
+    x = np.arange(1, full_paths.shape[1] + 1) / 252.0
+    full = summarize_paths(full_paths)
+    sitout = summarize_paths(sitout_paths)
+
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=dates, y=p_full["p95"], line=dict(width=0), showlegend=False, hoverinfo="skip"))
-    fig.add_trace(go.Scatter(x=dates, y=p_full["p5"], line=dict(width=0), fill="tonexty", name="Full 5th-95th percentile", hoverinfo="skip"))
-    fig.add_trace(go.Scatter(x=dates, y=p_full["p50"], mode="lines", name="Full participation median"))
-    fig.add_trace(go.Scatter(x=dates, y=p_sit["p50"], mode="lines", name=f"Sit out first {sitout_months} months median"))
+
+    # Faint individual full-participation paths, like the prior chart.
+    rng = np.random.default_rng(seed)
+    n_paths = min(sample_paths, full_paths.shape[0])
+    if n_paths > 0:
+        sample_idx = rng.choice(full_paths.shape[0], size=n_paths, replace=False)
+        for idx in sample_idx:
+            fig.add_trace(
+                go.Scatter(
+                    x=x,
+                    y=full_paths[idx],
+                    mode="lines",
+                    line=dict(width=0.6),
+                    opacity=0.08,
+                    hoverinfo="skip",
+                    showlegend=False,
+                    name="Simulation path",
+                )
+            )
+
+    # Outer cone: 5th-95th percentile.
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=full["p95"],
+            mode="lines",
+            line=dict(width=0),
+            hoverinfo="skip",
+            showlegend=False,
+            name="95th percentile",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=full["p5"],
+            mode="lines",
+            line=dict(width=0),
+            fill="tonexty",
+            opacity=0.18,
+            hoverinfo="skip",
+            name="5th-95th percentile range",
+        )
+    )
+
+    # Inner cone: 25th-75th percentile.
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=full["p75"],
+            mode="lines",
+            line=dict(width=0),
+            hoverinfo="skip",
+            showlegend=False,
+            name="75th percentile",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=full["p25"],
+            mode="lines",
+            line=dict(width=0),
+            fill="tonexty",
+            opacity=0.26,
+            hoverinfo="skip",
+            name="25th-75th percentile range",
+        )
+    )
+
+    # Median full participation.
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=full["p50"],
+            mode="lines",
+            line=dict(width=3),
+            name="Median projection",
+            hovertemplate="Year %{x:.1f}<br>$%{y:,.0f}<extra></extra>",
+        )
+    )
+
+    # Median sit-out overlay.
+    if sitout_months > 0:
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=sitout["p50"],
+                mode="lines",
+                line=dict(width=2.5, dash="dash"),
+                name=f"Sit out first {sitout_months} months median",
+                hovertemplate="Year %{x:.1f}<br>$%{y:,.0f}<extra></extra>",
+            )
+        )
+
+    # Current balance reference.
+    fig.add_hline(
+        y=current_balance,
+        line_width=1,
+        line_dash="dash",
+        annotation_text="Current balance",
+        annotation_position="bottom right",
+    )
+
     fig.update_layout(
-        title=f"{years}-Year Monte Carlo Projection",
-        xaxis_title="Date",
+        title=f"Monte Carlo Projection — {years}-Year Strategy Distribution: {selected_scope}",
+        xaxis_title="Years",
         yaxis_title="Projected Account Value",
         hovermode="x unified",
+        legend_title_text="Scenario",
         margin=dict(l=20, r=20, t=60, b=20),
+        height=650 if years == 10 else 560,
     )
+    fig.update_yaxes(tickprefix="$", tickformat=",.0f")
+
     return fig
 
 
-def distribution_chart(paths_full, paths_sit, years, sitout_months) -> go.Figure:
+def make_distribution_chart(
+    full_paths: np.ndarray,
+    sitout_paths: np.ndarray,
+    years: int,
+    sitout_months: int,
+    selected_scope: str,
+) -> go.Figure:
+    full_final = np.asarray(full_paths[:, -1], dtype=float)
+    sitout_final = np.asarray(sitout_paths[:, -1], dtype=float)
+
+    full_x, full_density = _smooth_density(full_final)
+    sit_x, sit_density = _smooth_density(sitout_final)
+
     fig = go.Figure()
-    fig.add_trace(go.Histogram(x=paths_full[:, -1], histnorm="probability density", name="Full participation", opacity=0.6, nbinsx=60))
-    fig.add_trace(go.Histogram(x=paths_sit[:, -1], histnorm="probability density", name=f"Sit out first {sitout_months} months", opacity=0.6, nbinsx=60))
+
+    fig.add_trace(
+        go.Scatter(
+            x=full_x,
+            y=full_density,
+            mode="lines",
+            fill="tozeroy",
+            opacity=0.45,
+            name="Full participation",
+            hovertemplate="$%{x:,.0f}<br>Density %{y:.4g}<extra></extra>",
+        )
+    )
+
+    if sitout_months > 0:
+        fig.add_trace(
+            go.Scatter(
+                x=sit_x,
+                y=sit_density,
+                mode="lines",
+                fill="tozeroy",
+                opacity=0.35,
+                name=f"Sit out first {sitout_months} months",
+                hovertemplate="$%{x:,.0f}<br>Density %{y:.4g}<extra></extra>",
+            )
+        )
+
+    # Percentile markers for the full participation ending distribution.
+    for percentile in [5, 50, 95]:
+        value = float(np.percentile(full_final, percentile))
+        fig.add_vline(
+            x=value,
+            line_dash="dash" if percentile != 50 else "solid",
+            line_width=1.4 if percentile != 50 else 2.2,
+            annotation_text=f"p{percentile}: ${value:,.0f}",
+            annotation_position="top",
+        )
+
     fig.update_layout(
-        title=f"{years}-Year Ending Value Distribution",
+        title=f"{years}-Year Ending Value Distribution: {selected_scope}",
         xaxis_title="Ending Account Value",
         yaxis_title="Probability Density",
-        barmode="overlay",
+        legend_title_text="Scenario",
         margin=dict(l=20, r=20, t=60, b=20),
+        height=500,
     )
+    fig.update_xaxes(tickprefix="$", tickformat=",.0f")
+
     return fig
 
 
-# ------------------------------------------------------------
+# -----------------------------
 # Sidebar
-# ------------------------------------------------------------
-
+# -----------------------------
 with st.sidebar:
     st.header("Inputs")
 
-    files = st.file_uploader(
+    uploaded_files = st.file_uploader(
         "Upload portfolio or strategy CSV files",
         type=["csv"],
         accept_multiple_files=True,
+        help=(
+            "Portfolio balance-history format is supported: Date, NLV, Day_PL, Day_PL_Percent, Deposits/Withdrawals. "
+            "Strategy files are also supported if they contain Date plus balance, return, or P/L columns."
+        ),
     )
 
-    strategy_starting_balance = st.number_input(
+    starting_balance_for_pnl = st.number_input(
         "Starting balance for P/L-only strategy files",
-        min_value=1000.0,
+        min_value=1.0,
         value=100000.0,
         step=5000.0,
         format="%.2f",
+        help="Used only when a file has P/L but no balance column.",
     )
 
     st.divider()
-    st.subheader("Sit-out settings")
-    sitout_months = st.slider("Sit-out months", 1, 12, 3, 1)
+    st.subheader("Sit-out overlay")
+
+    sitout_months = st.slider(
+        "Sit-out months",
+        min_value=1,
+        max_value=12,
+        value=3,
+        step=1,
+    )
 
     st.divider()
-    st.subheader("Monte Carlo settings")
-    simulations = st.slider("Simulations", 250, 5000, 1000, 250)
-    seed = st.number_input("Random seed", value=42, step=1)
+    st.subheader("Monte Carlo")
 
-if not files:
-    st.info("Upload your portfolio balance-history CSV or one or more strategy CSV files.")
+    simulations = st.slider(
+        "Simulations",
+        min_value=250,
+        max_value=5000,
+        value=1000,
+        step=250,
+    )
+
+    exclude_zero_returns = st.checkbox(
+        "Exclude 0% return days from Monte Carlo",
+        value=True,
+        help=(
+            "Useful for balance-history files that include weekends/holidays as 0% days. "
+            "Turn off if a no-trade day should count as a true 0% strategy day."
+        ),
+    )
+
+    random_seed = st.number_input(
+        "Random seed",
+        value=42,
+        step=1,
+    )
+
+
+if not uploaded_files:
+    st.info(
+        "Upload a portfolio balance-history CSV or one/more strategy CSV files to generate the analysis."
+    )
     st.stop()
 
-scopes = parse_files(files, strategy_starting_balance)
 
-if not scopes:
-    st.error("No usable data was found. The file needs a date column and either NLV/balance, return, or P/L data.")
-    st.stop()
+parsed = parse_uploaded_files(
+    uploaded_files,
+    starting_balance_for_pnl=starting_balance_for_pnl,
+)
 
-
-# ------------------------------------------------------------
-# Scope selection
-# ------------------------------------------------------------
-
-scope_labels = list(scopes.keys())
-selected_label = st.sidebar.selectbox("Analysis scope", scope_labels)
-scope = scopes[selected_label]
-df = scope.data.copy().sort_values("date").reset_index(drop=True)
-
-with st.expander("Import notes", expanded=False):
-    for label, sc in scopes.items():
-        st.markdown(f"**{label}**")
-        for note in sc.notes:
+if parsed.notes:
+    with st.expander("Import notes", expanded=False):
+        for note in parsed.notes:
             st.write(f"- {note}")
 
-st.subheader(selected_label)
+if not parsed.scopes:
+    st.error(
+        "No usable data series were found. The app needs a date column plus one of: NLV/balance, return, or P/L."
+    )
+    if not parsed.preview.empty:
+        st.write("Preview of uploaded data:")
+        st.dataframe(parsed.preview.head(25), use_container_width=True)
+    st.stop()
 
-if scope.kind == "portfolio":
-    available_basis = list(RETURN_BASIS_OPTIONS.keys())
-    # Default to adjusted equity. This removes cash flows and avoids the flat result caused by Day_PL/prior raw NLV.
-    default_basis_index = available_basis.index("Adjusted equity return — removes deposits/withdrawals")
-else:
-    available_basis = [
-        "Adjusted equity return — removes deposits/withdrawals",
-        "Return column from file",
-        "Raw NLV % change — includes deposits/withdrawals, not recommended for MC",
-    ]
-    default_basis_index = 0
 
-basis_label = st.sidebar.selectbox(
-    "Return basis",
-    available_basis,
-    index=default_basis_index,
-    help="For portfolio files, adjusted equity removes deposits/withdrawals. Day P/L ÷ prior NLV is conservative and can look flat when NLV contains idle capital.",
-)
-return_col = RETURN_BASIS_OPTIONS[basis_label]
+scope_options = list(parsed.scopes.keys())
+default_index = 0
+for i, option in enumerate(scope_options):
+    if "portfolio" in option.lower():
+        default_index = i
+        break
 
-if df[return_col].isna().all():
-    st.warning(f"The selected return basis `{basis_label}` is unavailable for this file. Falling back to adjusted equity returns.")
-    return_col = "return_adjusted_equity"
-    basis_label = "Adjusted equity return — removes deposits/withdrawals"
+with st.sidebar:
+    selected_scope = st.selectbox(
+        "Analysis scope",
+        options=scope_options,
+        index=default_index,
+        help="Choose the portfolio balance history or an individual strategy.",
+    )
 
-sampling_mode = st.sidebar.selectbox(
-    "Monte Carlo sampling days",
-    ["Weekdays only", "Active trading days only", "All calendar days"],
-    index=0,
-    help="The prior projection was closer to a trading-day model. All calendar days includes weekends/zero-return days and can make the simulation look flat.",
-)
 
-exclude_transfer_days = st.sidebar.checkbox(
-    "Exclude deposit/withdrawal days and following day",
-    value=True if scope.kind == "portfolio" else False,
-    help="Broker balance exports can show artificial P/L jumps around transfers. Excluding those days keeps the return stream cleaner.",
-)
+daily = parsed.scopes[selected_scope].copy().sort_values("date").reset_index(drop=True)
 
-first_date = pd.to_datetime(df["date"]).min().normalize()
-last_date = pd.to_datetime(df["date"]).max().normalize()
+if daily.empty or len(daily) < 3:
+    st.error("The selected scope does not have enough rows for analysis.")
+    st.stop()
+
+
+first_date = pd.to_datetime(daily["date"]).min().normalize()
+last_date = pd.to_datetime(daily["date"]).max().normalize()
 default_sitout_start = max(first_date, last_date - pd.DateOffset(months=sitout_months))
 
-sitout_start_date = st.sidebar.date_input(
-    "Historical sit-out start date",
-    value=default_sitout_start.date(),
-    min_value=first_date.date(),
-    max_value=last_date.date(),
-)
-
-projection_starting_value_default = float(df["nlv"].dropna().iloc[-1]) if "nlv" in df else float(df["adjusted_equity"].dropna().iloc[-1])
-projection_starting_value = st.sidebar.number_input(
-    "Projection starting value",
-    min_value=0.0,
-    value=projection_starting_value_default,
-    step=5000.0,
-    format="%.2f",
-)
+with st.sidebar:
+    sitout_start_date = st.date_input(
+        "Sit-out start date",
+        value=default_sitout_start.date(),
+        min_value=first_date.date(),
+        max_value=last_date.date(),
+    )
 
 
-# ------------------------------------------------------------
+# -----------------------------
 # Historical overlay
-# ------------------------------------------------------------
+# -----------------------------
+sitout_curve, sitout_start, sitout_end = apply_sitout_curve(
+    daily=daily,
+    sitout_start=pd.Timestamp(sitout_start_date),
+    sitout_months=sitout_months,
+)
 
-returns = clean_returns(df[return_col])
-historical_starting_value = float(df["nlv"].iloc[0]) if "nlv" in df else projection_starting_value
-full_curve = equity_curve(returns, historical_starting_value)
-sit_returns, sitout_start, sitout_end = apply_sitout(returns, df["date"], pd.Timestamp(sitout_start_date), sitout_months)
-sit_curve = equity_curve(sit_returns, historical_starting_value)
+full_curve = daily["model_balance"].astype(float)
+full_final = float(full_curve.iloc[-1])
+sitout_final = float(sitout_curve.iloc[-1])
+
+gap_label, gap_value, gap_pct = describe_gap(full_final, sitout_final)
+
+st.subheader(f"Selected Analysis Scope: {selected_scope}")
+
+source_kind = str(daily["source_kind"].iloc[0]).replace("_", " ").title()
+st.caption(
+    f"Source type: {source_kind} | Source file: {daily['source_file'].iloc[0]} | "
+    f"Date range: {first_date.date()} to {last_date.date()}"
+)
 
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("Data Start", str(first_date.date()))
-col2.metric("Data End", str(last_date.date()))
-col3.metric("Historical Modeled Return", pct(full_curve.iloc[-1] / full_curve.iloc[0] - 1))
-col4.metric("Current NLV / Balance", money(projection_starting_value_default))
 
-if scope.kind == "portfolio":
-    extra1, extra2, extra3 = st.columns(3)
-    extra1.metric("Final NLV", money(df["nlv"].iloc[-1]))
-    extra2.metric("Final Adjusted Equity", money(df["adjusted_equity"].iloc[-1]))
-    if "alltime_pl_percent" in df and df["alltime_pl_percent"].notna().any():
-        extra3.metric("Broker AllTime PL %", f"{df['alltime_pl_percent'].dropna().iloc[-1]:.2f}%")
-    else:
-        extra3.metric("Broker AllTime PL %", "—")
+col1.metric("Starting Value", money(float(daily["initial_balance"].iloc[0])))
+col2.metric("Full Participation Final", money(full_final))
+col3.metric("Total Return", pct(full_final / float(daily["initial_balance"].iloc[0]) - 1))
+col4.metric("Observations", f"{len(daily):,}")
 
-fig = historical_overlay_chart(df["date"], full_curve, sit_curve, sitout_start, sitout_end)
-st.plotly_chart(fig, use_container_width=True)
-
-gap = float(full_curve.iloc[-1] - sit_curve.iloc[-1])
-gap_label = "Opportunity cost of sitting out" if gap > 0 else "Capital protected by sitting out" if gap < 0 else "No difference"
-
-c1, c2, c3 = st.columns(3)
-c1.metric("Full Participation Final", money(full_curve.iloc[-1]))
-c2.metric("Sit-Out Final", money(sit_curve.iloc[-1]))
-c3.metric(gap_label, money(abs(gap)))
-
-
-# ------------------------------------------------------------
-# Return diagnostics
-# ------------------------------------------------------------
-
-mc_returns = filtered_monte_carlo_returns(
-    df,
-    return_col=return_col,
-    sampling_mode=sampling_mode,
-    exclude_transfer_days=exclude_transfer_days,
+fig_hist = make_historical_overlay_chart(
+    daily=daily,
+    full_curve=full_curve,
+    sitout_curve=sitout_curve,
+    sitout_start=sitout_start,
+    sitout_end=sitout_end,
+    selected_scope=selected_scope,
 )
 
-stats = summarize_return_stream(mc_returns)
+st.plotly_chart(fig_hist, use_container_width=True)
 
-st.subheader("Monte Carlo Return Stream")
 
-d1, d2, d3, d4, d5 = st.columns(5)
-d1.metric("Sample Days Used", f"{stats['count']:,}")
-d2.metric("Average Return", pct(stats["mean"]))
-d3.metric("Daily Volatility", pct(stats["std"]))
-d4.metric("Annualized Mean", pct(stats["annualized_mean"]))
-d5.metric("Worst Sample Day", pct(stats["min"]))
+st.subheader("Sit-Out Analysis")
 
-with st.expander("Why the earlier simulation looked flat", expanded=False):
+col1, col2, col3 = st.columns(3)
+
+col1.metric("Full Participation Final Value", money(full_final))
+col2.metric("Sit-Out Final Value", money(sitout_final))
+col3.metric(gap_label, money(abs(gap_value)), pct(abs(gap_pct)))
+
+if gap_value > 0:
+    st.success(
+        "In this selected window, sitting out reduced ending value versus full participation. "
+        "That is the opportunity cost of missing the positive-drift return stream."
+    )
+elif gap_value < 0:
+    st.warning(
+        "In this selected window, sitting out improved ending value versus full participation. "
+        "That means the avoided losses were larger than the missed gains."
+    )
+else:
+    st.info("In this selected window, the sit-out and full-participation paths ended at the same value.")
+
+with st.expander("How the sit-out overlay is calculated", expanded=False):
     st.markdown(
-        """
-The flat result usually comes from two issues in portfolio balance-history exports:
-
-1. **Using `Day_PL / prior NLV` can understate the strategy return** when NLV includes idle capital, deposits, or withdrawals.
-2. **Sampling all calendar days includes weekends and zero-return days**, which dilutes the return stream in a 252-trading-day Monte Carlo model.
-
-This build defaults to **adjusted equity returns**, **weekdays only**, and **excludes transfer days plus the following day** for portfolio exports. You can change those settings in the sidebar.
+        f"""
+- Returns from **{sitout_start.date()} through {(sitout_end - pd.Timedelta(days=1)).date()}** are set to **0%**.
+- Cash flows, such as deposits or withdrawals, are preserved.
+- After the sit-out window, the same historical return stream resumes.
+- For portfolio balance-history files, returns are based on `Day_PL / prior NLV` when available. This avoids treating deposits as trading gains.
 """
     )
 
+
+# -----------------------------
+# Return diagnostics
+# -----------------------------
+st.subheader("Return Diagnostics")
+
+returns_for_diagnostics = daily["return"].replace([np.inf, -np.inf], np.nan).dropna()
+
+if exclude_zero_returns:
+    returns_for_mc = returns_for_diagnostics[returns_for_diagnostics.abs() > 1e-12]
+else:
+    returns_for_mc = returns_for_diagnostics
+
+returns_for_mc = returns_for_mc.dropna()
+
+col1, col2, col3, col4 = st.columns(4)
+
+col1.metric("Average Daily Return", pct(returns_for_diagnostics.mean()))
+col2.metric("Daily Volatility", pct(returns_for_diagnostics.std()))
+col3.metric("Best Day", pct(returns_for_diagnostics.max()))
+col4.metric("Worst Day", pct(returns_for_diagnostics.min()))
+
 fig_ret = go.Figure()
-fig_ret.add_trace(go.Histogram(x=mc_returns, nbinsx=60, name="Monte Carlo sample returns"))
+fig_ret.add_trace(
+    go.Histogram(
+        x=returns_for_diagnostics,
+        nbinsx=60,
+        histnorm="probability density",
+        name="Daily Returns",
+    )
+)
 fig_ret.update_layout(
-    title="Filtered Return Distribution Used for Monte Carlo",
+    title=f"Historical Daily Return Distribution: {selected_scope}",
     xaxis_title="Daily Return",
-    yaxis_title="Count",
+    yaxis_title="Probability Density",
     margin=dict(l=20, r=20, t=60, b=20),
 )
 st.plotly_chart(fig_ret, use_container_width=True)
 
+if exclude_zero_returns:
+    st.caption(
+        f"Monte Carlo will sample {len(returns_for_mc):,} non-zero return days out of {len(returns_for_diagnostics):,} total observations."
+    )
+else:
+    st.caption(
+        f"Monte Carlo will sample all {len(returns_for_mc):,} return observations, including 0% days."
+    )
 
-# ------------------------------------------------------------
-# Projections
-# ------------------------------------------------------------
+if len(returns_for_mc) < 5:
+    st.error(
+        "Not enough return observations are available for Monte Carlo. "
+        "Try turning off 'Exclude 0% return days' or uploading a longer history."
+    )
+    st.stop()
 
-st.subheader("Projection Overlays")
+
+# -----------------------------
+# Monte Carlo projections
+# -----------------------------
+st.subheader("Classic Monte Carlo Projection")
+
+projection_start_balance = float(full_curve.iloc[-1])
+
+st.markdown(
+    f"This section uses the classic Monte Carlo chart style: faint simulated paths, percentile cones, the median projection, and a dashed sit-out median for the first {sitout_months} months."
+)
 
 try:
-    paths_1_full = monte_carlo_paths(
-        mc_returns,
-        starting_value=projection_starting_value,
+    paths_1yr_full = monte_carlo_paths(
+        returns_for_mc,
+        starting_balance=projection_start_balance,
         years=1,
         simulations=simulations,
         sitout_months=0,
-        seed=int(seed),
+        seed=int(random_seed),
     )
-    paths_1_sit = monte_carlo_paths(
-        mc_returns,
-        starting_value=projection_starting_value,
+
+    paths_1yr_sitout = monte_carlo_paths(
+        returns_for_mc,
+        starting_balance=projection_start_balance,
         years=1,
         simulations=simulations,
         sitout_months=sitout_months,
-        seed=int(seed),
+        seed=int(random_seed),
     )
-    paths_10_full = monte_carlo_paths(
-        mc_returns,
-        starting_value=projection_starting_value,
+
+    paths_10yr_full = monte_carlo_paths(
+        returns_for_mc,
+        starting_balance=projection_start_balance,
         years=10,
         simulations=simulations,
         sitout_months=0,
-        seed=int(seed),
+        seed=int(random_seed),
     )
-    paths_10_sit = monte_carlo_paths(
-        mc_returns,
-        starting_value=projection_starting_value,
+
+    paths_10yr_sitout = monte_carlo_paths(
+        returns_for_mc,
+        starting_balance=projection_start_balance,
         years=10,
         simulations=simulations,
         sitout_months=sitout_months,
-        seed=int(seed),
+        seed=int(random_seed),
     )
+
 except ValueError as exc:
     st.error(str(exc))
     st.stop()
 
+
+# 1-year projection
 st.markdown("### 1-Year Projection")
-st.plotly_chart(projection_chart(paths_1_full, paths_1_sit, last_date, 1, sitout_months), use_container_width=True)
-st.plotly_chart(distribution_chart(paths_1_full, paths_1_sit, 1, sitout_months), use_container_width=True)
 
-s1f = path_summary(paths_1_full)
-s1s = path_summary(paths_1_sit)
+fig_1yr = make_projection_chart(
+    paths_1yr_full,
+    paths_1yr_sitout,
+    years=1,
+    sitout_months=sitout_months,
+    selected_scope=selected_scope,
+    current_balance=projection_start_balance,
+    seed=int(random_seed),
+)
+st.plotly_chart(fig_1yr, use_container_width=True)
 
-p1, p2, p3, p4 = st.columns(4)
-p1.metric("1Y Full Median", money(s1f["median"]))
-p2.metric("1Y Sit-Out Median", money(s1s["median"]))
-p3.metric("1Y Median Difference", money(abs(s1f["median"] - s1s["median"])))
-p4.metric("1Y Full 5th Percentile", money(s1f["p5"]))
+stats_1_full = final_stats(paths_1yr_full)
+stats_1_sit = final_stats(paths_1yr_sitout)
+median_gap_1 = stats_1_full["median"] - stats_1_sit["median"]
 
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Full Median", money(stats_1_full["median"]))
+c2.metric("Sit-Out Median", money(stats_1_sit["median"]))
+c3.metric("Median Difference", money(abs(median_gap_1)))
+c4.metric("Full 5th Percentile", money(stats_1_full["p5"]))
+
+fig_1yr_dist = make_distribution_chart(
+    paths_1yr_full,
+    paths_1yr_sitout,
+    years=1,
+    sitout_months=sitout_months,
+    selected_scope=selected_scope,
+)
+st.plotly_chart(fig_1yr_dist, use_container_width=True)
+
+
+# 10-year projection
 st.markdown("### 10-Year Projection")
-st.plotly_chart(projection_chart(paths_10_full, paths_10_sit, last_date, 10, sitout_months), use_container_width=True)
-st.plotly_chart(distribution_chart(paths_10_full, paths_10_sit, 10, sitout_months), use_container_width=True)
 
-s10f = path_summary(paths_10_full)
-s10s = path_summary(paths_10_sit)
+fig_10yr = make_projection_chart(
+    paths_10yr_full,
+    paths_10yr_sitout,
+    years=10,
+    sitout_months=sitout_months,
+    selected_scope=selected_scope,
+    current_balance=projection_start_balance,
+    seed=int(random_seed),
+)
+st.plotly_chart(fig_10yr, use_container_width=True)
 
-q1, q2, q3, q4 = st.columns(4)
-q1.metric("10Y Full Median", money(s10f["median"]))
-q2.metric("10Y Sit-Out Median", money(s10s["median"]))
-q3.metric("10Y Median Difference", money(abs(s10f["median"] - s10s["median"])))
-q4.metric("10Y Full 5th Percentile", money(s10f["p5"]))
+stats_10_full = final_stats(paths_10yr_full)
+stats_10_sit = final_stats(paths_10yr_sitout)
+median_gap_10 = stats_10_full["median"] - stats_10_sit["median"]
+
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Full Median", money(stats_10_full["median"]))
+c2.metric("Sit-Out Median", money(stats_10_sit["median"]))
+c3.metric("Median Difference", money(abs(median_gap_10)))
+c4.metric("Full 5th Percentile", money(stats_10_full["p5"]))
+
+fig_10yr_dist = make_distribution_chart(
+    paths_10yr_full,
+    paths_10yr_sitout,
+    years=10,
+    sitout_months=sitout_months,
+    selected_scope=selected_scope,
+)
+st.plotly_chart(fig_10yr_dist, use_container_width=True)
 
 
-summary = pd.DataFrame(
+# -----------------------------
+# Summary table
+# -----------------------------
+st.subheader("Projection Summary")
+
+summary_df = pd.DataFrame(
     [
-        {"Horizon": "1 Year", "Scenario": "Full Participation", **s1f},
-        {"Horizon": "1 Year", "Scenario": f"Sit Out First {sitout_months} Months", **s1s},
-        {"Horizon": "10 Years", "Scenario": "Full Participation", **s10f},
-        {"Horizon": "10 Years", "Scenario": f"Sit Out First {sitout_months} Months", **s10s},
+        {
+            "Horizon": "1 Year",
+            "Scenario": "Full Participation",
+            "5th Percentile": stats_1_full["p5"],
+            "25th Percentile": stats_1_full["p25"],
+            "Median": stats_1_full["median"],
+            "75th Percentile": stats_1_full["p75"],
+            "95th Percentile": stats_1_full["p95"],
+        },
+        {
+            "Horizon": "1 Year",
+            "Scenario": f"Sit Out First {sitout_months} Months",
+            "5th Percentile": stats_1_sit["p5"],
+            "25th Percentile": stats_1_sit["p25"],
+            "Median": stats_1_sit["median"],
+            "75th Percentile": stats_1_sit["p75"],
+            "95th Percentile": stats_1_sit["p95"],
+        },
+        {
+            "Horizon": "10 Years",
+            "Scenario": "Full Participation",
+            "5th Percentile": stats_10_full["p5"],
+            "25th Percentile": stats_10_full["p25"],
+            "Median": stats_10_full["median"],
+            "75th Percentile": stats_10_full["p75"],
+            "95th Percentile": stats_10_full["p95"],
+        },
+        {
+            "Horizon": "10 Years",
+            "Scenario": f"Sit Out First {sitout_months} Months",
+            "5th Percentile": stats_10_sit["p5"],
+            "25th Percentile": stats_10_sit["p25"],
+            "Median": stats_10_sit["median"],
+            "75th Percentile": stats_10_sit["p75"],
+            "95th Percentile": stats_10_sit["p95"],
+        },
     ]
 )
 
-summary = summary.rename(
-    columns={
-        "p5": "5th Percentile",
-        "p25": "25th Percentile",
-        "median": "Median",
-        "p75": "75th Percentile",
-        "p95": "95th Percentile",
-        "mean": "Mean",
-    }
+currency_cols = [
+    "5th Percentile",
+    "25th Percentile",
+    "Median",
+    "75th Percentile",
+    "95th Percentile",
+]
+
+st.dataframe(
+    summary_df.style.format({col: "${:,.0f}" for col in currency_cols}),
+    use_container_width=True,
+    hide_index=True,
 )
 
-st.subheader("Projection Summary")
-money_cols = ["5th Percentile", "25th Percentile", "Median", "75th Percentile", "95th Percentile", "Mean"]
-st.dataframe(
-    summary.style.format({col: "${:,.0f}" for col in money_cols}),
-    hide_index=True,
-    use_container_width=True,
-)
+with st.expander("Parsed data preview", expanded=False):
+    st.write("Selected scope data:")
+    st.dataframe(daily.head(50), use_container_width=True)
 
 st.caption(
-    "Monte Carlo projections are generated by resampling the selected historical daily return stream. "
-    "They are not predictions. The results are highly sensitive to return basis, sample-day filtering, and whether transfer days are included."
+    "Monte Carlo projections are based on random resampling of the selected historical return stream. "
+    "They are not predictions; they show a distribution of possible outcomes if the historical return/volatility profile persists."
 )
