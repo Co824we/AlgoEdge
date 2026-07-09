@@ -761,7 +761,9 @@ with st.sidebar:
     st.header("Monte Carlo")
     simulations = st.slider("Simulations", min_value=250, max_value=5000, value=1000, step=250)
     sample_paths = st.slider("Faint sample paths shown", min_value=0, max_value=250, value=80, step=10)
-    random_seed = st.number_input("Random seed", value=42, step=1)
+
+# Fixed internal seed keeps results repeatable without exposing a confusing control.
+RANDOM_SEED = 42
 
 
 if not uploaded_files:
@@ -863,8 +865,8 @@ st.markdown(
 )
 
 try:
-    paths_1yr = monte_carlo_paths(clean_returns, current_balance, years=1, simulations=simulations, seed=int(random_seed))
-    paths_10yr = monte_carlo_paths(clean_returns, current_balance, years=10, simulations=simulations, seed=int(random_seed))
+    paths_1yr = monte_carlo_paths(clean_returns, current_balance, years=1, simulations=simulations, seed=RANDOM_SEED)
+    paths_10yr = monte_carlo_paths(clean_returns, current_balance, years=10, simulations=simulations, seed=RANDOM_SEED)
 except ValueError as exc:
     st.error(str(exc))
     st.stop()
@@ -874,7 +876,7 @@ stats_10 = path_stats(paths_10yr)
 
 # 1 year
 st.markdown("### 1-Year Projection")
-st.plotly_chart(make_classic_mc_chart(paths_1yr, current_balance, years=1, sample_paths=sample_paths, seed=int(random_seed)), use_container_width=True)
+st.plotly_chart(make_classic_mc_chart(paths_1yr, current_balance, years=1, sample_paths=sample_paths, seed=RANDOM_SEED), use_container_width=True)
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("5th percentile", money(stats_1["p5"]))
@@ -886,7 +888,7 @@ st.plotly_chart(make_distribution_chart(paths_1yr, years=1), use_container_width
 
 # 10 year
 st.markdown("### 10-Year Projection")
-st.plotly_chart(make_classic_mc_chart(paths_10yr, current_balance, years=10, sample_paths=sample_paths, seed=int(random_seed)), use_container_width=True)
+st.plotly_chart(make_classic_mc_chart(paths_10yr, current_balance, years=10, sample_paths=sample_paths, seed=RANDOM_SEED), use_container_width=True)
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("5th percentile", money(stats_10["p5"]))
