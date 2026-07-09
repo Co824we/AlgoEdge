@@ -803,15 +803,18 @@ current_balance = float(daily["balance"].dropna().iloc[-1])
 starting_balance = float(daily["balance"].dropna().iloc[0])
 
 # -----------------------------
-# Historical section
+# Monte Carlo input summary
 # -----------------------------
-st.subheader(f"Historical Performance — {selected_name}")
+st.subheader(f"Monte Carlo Input Summary — {selected_name}")
 
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Starting value", money(starting_balance))
-col2.metric("Current value", money(current_balance))
-col3.metric("Historical return", pct(current_balance / starting_balance - 1))
-col4.metric("Return observations", f"{len(clean_returns):,}")
+col1, col2, col3 = st.columns(3)
+col1.metric("Current balance used", money(current_balance))
+col2.metric("Return observations", f"{len(clean_returns):,}")
+col3.metric("Excluded observations", f"{int((~return_frame['used_in_mc']).sum()):,}")
+
+st.caption(
+    "Historical equity curve removed: portfolio NLV can reflect deposits and withdrawals, so this dashboard focuses on the cleaned realized return stream used for Monte Carlo."
+)
 
 excluded_count = int((~return_frame["used_in_mc"]).sum())
 if excluded_count > 0:
@@ -824,8 +827,6 @@ if excluded_count > 0:
             .reset_index(name="Count")
         )
         st.dataframe(counts, use_container_width=True, hide_index=True)
-
-st.plotly_chart(make_historical_chart(daily), use_container_width=True)
 
 # -----------------------------
 # Return diagnostics
