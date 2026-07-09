@@ -19,14 +19,85 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("ALGO Edge Monte Carlo")
-st.caption("Monte Carlo projections based on actual realized returns.")
+st.markdown(
+    """
+<div style="padding: 10px 0 18px 0;">
+  <div style="font-size: 0.78rem; letter-spacing: 0.12em; text-transform: uppercase; color: #64748b; font-weight: 800;">ALGO Edge</div>
+  <div style="font-size: 3.0rem; line-height: 1.0; letter-spacing: -0.06em; font-weight: 850; color: #0f172a;">Monte Carlo</div>
+  <div style="margin-top: 0.55rem; font-size: 1.05rem; color: #475569; max-width: 780px;">Actual-return projections with cleaned broker balance history and strategy-level analysis.</div>
+</div>
+""",
+    unsafe_allow_html=True,
+)
 
 st.markdown(
     """
 Upload a portfolio balance-history file or individual strategy files. The app builds a historical return stream,
 then resamples those **actual realized returns** to generate 1-year and 10-year Monte Carlo projections.
 """
+)
+
+
+# -----------------------------
+# Visual polish
+# -----------------------------
+ACCENT = "#2563eb"
+ACCENT_DARK = "#1e40af"
+BAND_OUTER = "rgba(37, 99, 235, 0.12)"
+BAND_INNER = "rgba(37, 99, 235, 0.24)"
+PATH_COLOR = "rgba(30, 64, 175, 0.08)"
+MEDIAN_COLOR = "#0f172a"
+GRID_COLOR = "rgba(148, 163, 184, 0.22)"
+TEXT_COLOR = "#0f172a"
+MUTED_TEXT = "#64748b"
+CARD_BORDER = "rgba(148, 163, 184, 0.25)"
+
+st.markdown(
+    """
+<style>
+    .block-container {
+        max-width: 1220px;
+        padding-top: 2.0rem;
+        padding-bottom: 3.0rem;
+    }
+    h1 {
+        letter-spacing: -0.04em;
+        font-weight: 800;
+    }
+    h2, h3 {
+        letter-spacing: -0.025em;
+    }
+    [data-testid="stMetric"] {
+        background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+        border: 1px solid rgba(148, 163, 184, 0.24);
+        border-radius: 18px;
+        padding: 16px 18px;
+        box-shadow: 0 10px 28px rgba(15, 23, 42, 0.04);
+    }
+    [data-testid="stMetricLabel"] {
+        color: #64748b;
+        font-weight: 650;
+    }
+    [data-testid="stMetricValue"] {
+        color: #0f172a;
+        font-weight: 800;
+        letter-spacing: -0.03em;
+    }
+    div[data-testid="stExpander"] {
+        border: 1px solid rgba(148, 163, 184, 0.22);
+        border-radius: 14px;
+        box-shadow: 0 6px 18px rgba(15, 23, 42, 0.03);
+    }
+    .stPlotlyChart {
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        border-radius: 20px;
+        padding: 10px 8px 2px 8px;
+        background: #ffffff;
+        box-shadow: 0 16px 36px rgba(15, 23, 42, 0.04);
+    }
+</style>
+""",
+    unsafe_allow_html=True,
 )
 
 
@@ -318,25 +389,109 @@ def pct(value: float) -> str:
     return f"{value:.2%}"
 
 
+def apply_polished_layout(fig: go.Figure, title: str, x_title: str, y_title: str, height: int = 560) -> go.Figure:
+    fig.update_layout(
+        title=dict(text=title, x=0.02, xanchor="left", font=dict(size=22, color=TEXT_COLOR)),
+        xaxis_title=x_title,
+        yaxis_title=y_title,
+        template="plotly_white",
+        height=height,
+        hovermode="x unified",
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1.0,
+            bgcolor="rgba(255,255,255,0.85)",
+            bordercolor="rgba(148, 163, 184, 0.20)",
+            borderwidth=1,
+        ),
+        margin=dict(l=40, r=28, t=82, b=48),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        font=dict(family="Inter, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif", color=TEXT_COLOR),
+    )
+    fig.update_xaxes(
+        showgrid=True,
+        gridcolor=GRID_COLOR,
+        zeroline=False,
+        linecolor="rgba(148, 163, 184, 0.45)",
+        tickfont=dict(color=MUTED_TEXT),
+        title_font=dict(color=MUTED_TEXT),
+    )
+    fig.update_yaxes(
+        showgrid=True,
+        gridcolor=GRID_COLOR,
+        zeroline=False,
+        linecolor="rgba(148, 163, 184, 0.45)",
+        tickfont=dict(color=MUTED_TEXT),
+        title_font=dict(color=MUTED_TEXT),
+    )
+    return fig
+
+
+def prepare_return_frame(
+    daily: pd.DataFrame,
+    weekdays_only: bool,
+    exclude_zero_returns: bool,
+    exclude_deposit_days: bool,
+    exclude_day_after_deposit: bool,
+) -> pd.DataFrame:
+    """Prepare the actual return observations used for Monte Carlo.
+
+    Important broker-export issue: deposit/withdrawal days can create paired accounting artifacts.
+    If we remove only the cash-flow day but keep the following trading day, the return stream can
+    accidentally keep a large rebound while removing the offsetting negative day. For that reason,
+    the default is to exclude both cash-flow days and the next trading observation.
+    """
+    work = daily.copy().sort_values("date").reset_index(drop=True)
+
+    if weekdays_only:
+        work = work[work["date"].dt.weekday < 5].copy().reset_index(drop=True)
+
+    work["exclude_reason"] = ""
+
+    if "deposit_withdrawal" in work.columns:
+        cashflow_day = work["deposit_withdrawal"].fillna(0.0).abs() > 0
+    else:
+        cashflow_day = pd.Series(False, index=work.index)
+
+    next_trading_day_after_cashflow = cashflow_day.shift(1, fill_value=False)
+
+    if exclude_deposit_days:
+        work.loc[cashflow_day, "exclude_reason"] = "Cash-flow day"
+
+    if exclude_day_after_deposit:
+        mask = next_trading_day_after_cashflow & (work["exclude_reason"] == "")
+        work.loc[mask, "exclude_reason"] = "Trading day after cash flow"
+
+    if exclude_zero_returns:
+        zero_mask = work["return"].fillna(0.0) == 0.0
+        mask = zero_mask & (work["exclude_reason"] == "")
+        work.loc[mask, "exclude_reason"] = "Zero-return day"
+
+    work["used_in_mc"] = work["exclude_reason"].eq("")
+    work.loc[~np.isfinite(work["return"].astype(float)), "used_in_mc"] = False
+
+    return work
+
+
 def prepare_returns(
     daily: pd.DataFrame,
     weekdays_only: bool,
     exclude_zero_returns: bool,
     exclude_deposit_days: bool,
+    exclude_day_after_deposit: bool,
 ) -> pd.Series:
-    work = daily.copy().sort_values("date")
-
-    if weekdays_only:
-        work = work[work["date"].dt.weekday < 5]
-
-    if exclude_deposit_days and "deposit_withdrawal" in work.columns:
-        work = work[work["deposit_withdrawal"].fillna(0.0).abs() == 0]
-
-    returns = work["return"].replace([np.inf, -np.inf], np.nan).dropna().astype(float)
-
-    if exclude_zero_returns:
-        returns = returns[returns != 0]
-
+    frame = prepare_return_frame(
+        daily=daily,
+        weekdays_only=weekdays_only,
+        exclude_zero_returns=exclude_zero_returns,
+        exclude_deposit_days=exclude_deposit_days,
+        exclude_day_after_deposit=exclude_day_after_deposit,
+    )
+    returns = frame.loc[frame["used_in_mc"], "return"].replace([np.inf, -np.inf], np.nan).dropna().astype(float)
     return returns
 
 
@@ -377,18 +532,23 @@ def make_historical_chart(daily: pd.DataFrame) -> go.Figure:
             y=daily["balance"],
             mode="lines",
             name="Historical equity",
-            hovertemplate="%{x|%Y-%m-%d}<br>$%{y:,.0f}<extra></extra>",
+            line=dict(width=3, color=ACCENT),
+            hovertemplate="%{x|%b %d, %Y}<br><b>$%{y:,.0f}</b><extra></extra>",
         )
     )
-    fig.update_layout(
-        title="Historical Equity Curve",
-        xaxis_title="Date",
-        yaxis_title="Account value",
-        hovermode="x unified",
-        margin=dict(l=20, r=20, t=60, b=20),
+    fig.add_trace(
+        go.Scatter(
+            x=[daily["date"].iloc[0], daily["date"].iloc[-1]],
+            y=[daily["balance"].iloc[0], daily["balance"].iloc[-1]],
+            mode="markers",
+            marker=dict(size=9, color=ACCENT_DARK),
+            name="Start / current",
+            hovertemplate="%{x|%b %d, %Y}<br><b>$%{y:,.0f}</b><extra></extra>",
+        )
     )
+    apply_polished_layout(fig, "Historical Equity Curve", "Date", "Account value", height=430)
+    fig.update_yaxes(tickprefix="$", separatethousands=True)
     return fig
-
 
 def make_classic_mc_chart(paths: np.ndarray, current_balance: float, years: int, sample_paths: int, seed: int) -> go.Figure:
     x = np.arange(1, paths.shape[1] + 1) / 252.0
@@ -410,39 +570,38 @@ def make_classic_mc_chart(paths: np.ndarray, current_balance: float, years: int,
                     x=x,
                     y=paths[i],
                     mode="lines",
-                    line=dict(width=0.5),
-                    opacity=0.08,
+                    line=dict(width=0.65, color=PATH_COLOR),
                     showlegend=False,
                     hoverinfo="skip",
                 )
             )
 
     # 5th to 95th cone
-    fig.add_trace(go.Scatter(x=x, y=p95, mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=x, y=p95, mode="lines", line=dict(width=0, color="rgba(0,0,0,0)"), showlegend=False, hoverinfo="skip"))
     fig.add_trace(
         go.Scatter(
             x=x,
             y=p5,
             mode="lines",
-            line=dict(width=0),
+            line=dict(width=0, color="rgba(0,0,0,0)"),
             fill="tonexty",
-            opacity=0.18,
-            name="5th–95th percentile range",
+            fillcolor=BAND_OUTER,
+            name="5th–95th percentile",
             hoverinfo="skip",
         )
     )
 
     # 25th to 75th cone
-    fig.add_trace(go.Scatter(x=x, y=p75, mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=x, y=p75, mode="lines", line=dict(width=0, color="rgba(0,0,0,0)"), showlegend=False, hoverinfo="skip"))
     fig.add_trace(
         go.Scatter(
             x=x,
             y=p25,
             mode="lines",
-            line=dict(width=0),
+            line=dict(width=0, color="rgba(0,0,0,0)"),
             fill="tonexty",
-            opacity=0.30,
-            name="25th–75th percentile range",
+            fillcolor=BAND_INNER,
+            name="25th–75th percentile",
             hoverinfo="skip",
         )
     )
@@ -452,30 +611,26 @@ def make_classic_mc_chart(paths: np.ndarray, current_balance: float, years: int,
             x=x,
             y=p50,
             mode="lines",
-            line=dict(width=3),
+            line=dict(width=4, color=MEDIAN_COLOR),
             name="Median projection",
-            hovertemplate="Year %{x:.2f}<br>$%{y:,.0f}<extra></extra>",
+            hovertemplate="Year %{x:.2f}<br><b>$%{y:,.0f}</b><extra></extra>",
         )
     )
 
     fig.add_hline(
         y=current_balance,
         line_dash="dash",
+        line_color="rgba(100, 116, 139, 0.80)",
+        line_width=1.3,
         annotation_text="Current balance",
         annotation_position="bottom right",
+        annotation_font_color=MUTED_TEXT,
     )
 
-    fig.update_layout(
-        title=f"Monte Carlo Projection — {years}-Year Strategy Distribution",
-        xaxis_title="Years",
-        yaxis_title="Projected account value",
-        hovermode="x unified",
-        legend_title_text="Series",
-        margin=dict(l=20, r=20, t=60, b=20),
-    )
+    apply_polished_layout(fig, f"Monte Carlo Projection — {years}-Year Strategy Distribution", "Years", "Projected account value", height=640)
     fig.update_yaxes(tickprefix="$", separatethousands=True)
+    fig.update_xaxes(range=[0, years])
     return fig
-
 
 def smooth_density(values: np.ndarray, bins: int = 80) -> Tuple[np.ndarray, np.ndarray]:
     values = np.asarray(values, dtype=float)
@@ -505,35 +660,69 @@ def make_distribution_chart(paths: np.ndarray, years: int) -> go.Figure:
             x=x,
             y=y,
             mode="lines",
+            line=dict(width=3, color=ACCENT),
             fill="tozeroy",
-            name="Ending value distribution",
-            hovertemplate="$%{x:,.0f}<br>Density %{y:.6f}<extra></extra>",
+            fillcolor="rgba(37, 99, 235, 0.14)",
+            name="Ending value density",
+            hovertemplate="Ending value<br><b>$%{x:,.0f}</b><extra></extra>",
         )
     )
 
-    for label, value in [("p5", stats["p5"]), ("median", stats["median"]), ("p95", stats["p95"] )]:
-        fig.add_vline(x=value, line_dash="dash", annotation_text=label.upper(), annotation_position="top")
+    marker_specs = [
+        ("P5", stats["p5"], "rgba(100, 116, 139, 0.85)"),
+        ("Median", stats["median"], MEDIAN_COLOR),
+        ("P95", stats["p95"], "rgba(100, 116, 139, 0.85)"),
+    ]
+    for label, value, color in marker_specs:
+        fig.add_vline(
+            x=value,
+            line_dash="dash",
+            line_color=color,
+            line_width=1.4,
+            annotation_text=f"{label}: {money(value)}",
+            annotation_position="top",
+            annotation_font_color=color,
+        )
 
-    fig.update_layout(
-        title=f"{years}-Year Ending Value Distribution",
-        xaxis_title="Ending account value",
-        yaxis_title="Probability density",
-        margin=dict(l=20, r=20, t=60, b=20),
-    )
+    apply_polished_layout(fig, f"{years}-Year Ending Value Distribution", "Ending account value", "Probability density", height=470)
     fig.update_xaxes(tickprefix="$", separatethousands=True)
+    fig.update_yaxes(showticklabels=False, title_text="Density")
     return fig
 
 
 def make_return_distribution_chart(returns: pd.Series) -> go.Figure:
+    x, y = smooth_density(returns.values, bins=55)
     fig = go.Figure()
-    fig.add_trace(go.Histogram(x=returns, nbinsx=50, histnorm="probability density", name="Actual daily returns"))
-    fig.update_layout(
-        title="Actual Daily Return Distribution",
-        xaxis_title="Daily return",
-        yaxis_title="Probability density",
-        margin=dict(l=20, r=20, t=60, b=20),
+    fig.add_trace(
+        go.Histogram(
+            x=returns,
+            nbinsx=48,
+            histnorm="probability density",
+            marker=dict(color="rgba(37, 99, 235, 0.20)", line=dict(width=0)),
+            name="Daily return bars",
+            hovertemplate="Return %{x:.2%}<br>Density %{y:.4f}<extra></extra>",
+        )
     )
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=y,
+            mode="lines",
+            line=dict(width=3, color=ACCENT_DARK),
+            name="Smoothed density",
+            hovertemplate="Return %{x:.2%}<br>Density %{y:.4f}<extra></extra>",
+        )
+    )
+    fig.add_vline(
+        x=returns.mean(),
+        line_dash="dash",
+        line_color=MEDIAN_COLOR,
+        annotation_text="Mean",
+        annotation_position="top right",
+    )
+    apply_polished_layout(fig, "Actual Daily Return Distribution", "Daily return", "Probability density", height=430)
     fig.update_xaxes(tickformat=".2%")
+    fig.update_yaxes(showticklabels=False, title_text="Density")
     return fig
 
 
@@ -562,6 +751,11 @@ with st.sidebar:
     weekdays_only = st.checkbox("Use weekdays only", value=True)
     exclude_zero_returns = st.checkbox("Exclude zero-return days", value=True)
     exclude_deposit_days = st.checkbox("Exclude deposit/withdrawal days", value=True)
+    exclude_day_after_deposit = st.checkbox(
+        "Exclude trading day after deposit/withdrawal",
+        value=True,
+        help="Recommended for broker balance-history exports because cash-flow days can create paired accounting artifacts.",
+    )
 
     st.divider()
     st.header("Monte Carlo")
@@ -590,12 +784,14 @@ selected_name = st.sidebar.selectbox("Analysis scope", options=scope_names, inde
 selected_scope = next(s for s in scopes if s.name == selected_name)
 
 daily = selected_scope.daily.copy().sort_values("date").reset_index(drop=True)
-clean_returns = prepare_returns(
+return_frame = prepare_return_frame(
     daily,
     weekdays_only=weekdays_only,
     exclude_zero_returns=exclude_zero_returns,
     exclude_deposit_days=exclude_deposit_days,
+    exclude_day_after_deposit=exclude_day_after_deposit,
 )
+clean_returns = return_frame.loc[return_frame["used_in_mc"], "return"].replace([np.inf, -np.inf], np.nan).dropna().astype(float)
 
 if len(clean_returns) < 5:
     st.error("There are fewer than 5 usable return observations after filters. Loosen the filters or upload more data.")
@@ -615,6 +811,18 @@ col2.metric("Current value", money(current_balance))
 col3.metric("Historical return", pct(current_balance / starting_balance - 1))
 col4.metric("Return observations", f"{len(clean_returns):,}")
 
+excluded_count = int((~return_frame["used_in_mc"]).sum())
+if excluded_count > 0:
+    with st.expander("Excluded observations", expanded=False):
+        counts = (
+            return_frame.loc[~return_frame["used_in_mc"], "exclude_reason"]
+            .replace("", "Invalid return")
+            .value_counts()
+            .rename_axis("Reason")
+            .reset_index(name="Count")
+        )
+        st.dataframe(counts, use_container_width=True, hide_index=True)
+
 st.plotly_chart(make_historical_chart(daily), use_container_width=True)
 
 # -----------------------------
@@ -623,10 +831,21 @@ st.plotly_chart(make_historical_chart(daily), use_container_width=True)
 st.subheader("Actual Return Diagnostics")
 
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("Average daily return", pct(clean_returns.mean()))
-col2.metric("Daily volatility", pct(clean_returns.std()))
-col3.metric("Best day", pct(clean_returns.max()))
+avg_daily = clean_returns.mean()
+daily_vol = clean_returns.std()
+ann_arith = avg_daily * 252
+ann_geo_from_avg = (1 + avg_daily) ** 252 - 1 if avg_daily > -1 else np.nan
+
+col1.metric("Average daily return", pct(avg_daily))
+col2.metric("Daily volatility", pct(daily_vol))
+col3.metric("Annualized drift", pct(ann_arith))
 col4.metric("Worst day", pct(clean_returns.min()))
+
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Best day", pct(clean_returns.max()))
+col2.metric("Median day", pct(clean_returns.median()))
+col3.metric("Win rate", pct((clean_returns > 0).mean()))
+col4.metric("Compounded drift check", pct(ann_geo_from_avg))
 
 st.plotly_chart(make_return_distribution_chart(clean_returns), use_container_width=True)
 
@@ -639,7 +858,8 @@ with st.expander("Return stream used for Monte Carlo", expanded=False):
 # -----------------------------
 st.subheader("Monte Carlo Projections Based on Actual Returns")
 st.markdown(
-    "The projection resamples the actual historical daily return stream with replacement. No sit-out adjustment is applied."
+    "The projection resamples the cleaned actual historical daily return stream with replacement. "
+    "No sit-out adjustment is applied. For broker balance-history exports, cash-flow days and the following trading day are excluded by default to avoid accounting artifacts."
 )
 
 try:
