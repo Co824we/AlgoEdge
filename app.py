@@ -739,11 +739,17 @@ with st.sidebar:
     )
 
     starting_balance_for_pnl = st.number_input(
-        "Capital basis for P&L-only strategy files",
+        "Capital used to convert strategy P&L into returns",
         min_value=1.0,
         value=100000.0,
         step=5000.0,
         format="%.2f",
+        help=(
+            "Only used for strategy-level CSVs that include daily P&L but do not include "
+            "a balance, NLV, account value, or return column. The app converts those files "
+            "using: daily return = daily P&L / this capital amount. This input does not affect "
+            "portfolio balance-history files that already include NLV and Day_PL."
+        ),
     )
 
     st.divider()
