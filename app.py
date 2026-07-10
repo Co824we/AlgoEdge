@@ -747,20 +747,17 @@ with st.sidebar:
     )
 
     st.divider()
-    st.header("Return filters")
-    weekdays_only = st.checkbox("Use weekdays only", value=True)
-    exclude_zero_returns = st.checkbox("Exclude zero-return days", value=True)
-    exclude_deposit_days = st.checkbox("Exclude deposit/withdrawal days", value=True)
-    exclude_day_after_deposit = st.checkbox(
-        "Exclude trading day after deposit/withdrawal",
-        value=True,
-        help="Recommended for broker balance-history exports because cash-flow days can create paired accounting artifacts.",
-    )
-
-    st.divider()
     st.header("Monte Carlo")
     simulations = st.slider("Simulations", min_value=250, max_value=5000, value=1000, step=250)
     sample_paths = st.slider("Faint sample paths shown", min_value=0, max_value=250, value=80, step=10)
+
+# Built-in return-cleaning assumptions. These are intentionally not exposed
+# as user controls because the portfolio balance-history export can include
+# cash-flow/accounting artifacts that should not be sampled as trading returns.
+WEEKDAYS_ONLY = True
+EXCLUDE_ZERO_RETURNS = True
+EXCLUDE_DEPOSIT_DAYS = True
+EXCLUDE_DAY_AFTER_DEPOSIT = True
 
 # Fixed internal seed keeps results repeatable without exposing a confusing control.
 RANDOM_SEED = 42
@@ -788,15 +785,15 @@ selected_scope = next(s for s in scopes if s.name == selected_name)
 daily = selected_scope.daily.copy().sort_values("date").reset_index(drop=True)
 return_frame = prepare_return_frame(
     daily,
-    weekdays_only=weekdays_only,
-    exclude_zero_returns=exclude_zero_returns,
-    exclude_deposit_days=exclude_deposit_days,
-    exclude_day_after_deposit=exclude_day_after_deposit,
+    weekdays_only=WEEKDAYS_ONLY,
+    exclude_zero_returns=EXCLUDE_ZERO_RETURNS,
+    exclude_deposit_days=EXCLUDE_DEPOSIT_DAYS,
+    exclude_day_after_deposit=EXCLUDE_DAY_AFTER_DEPOSIT,
 )
 clean_returns = return_frame.loc[return_frame["used_in_mc"], "return"].replace([np.inf, -np.inf], np.nan).dropna().astype(float)
 
 if len(clean_returns) < 5:
-    st.error("There are fewer than 5 usable return observations after filters. Loosen the filters or upload more data.")
+    st.error("There are fewer than 5 usable return observations after applying the built-in return-cleaning assumptions. Upload more data or inspect the file structure.")
     st.stop()
 
 current_balance = float(daily["balance"].dropna().iloc[-1])
@@ -813,7 +810,8 @@ col2.metric("Return observations", f"{len(clean_returns):,}")
 col3.metric("Excluded observations", f"{int((~return_frame['used_in_mc']).sum()):,}")
 
 st.caption(
-    "Historical equity curve removed: portfolio NLV can reflect deposits and withdrawals, so this dashboard focuses on the cleaned realized return stream used for Monte Carlo."
+    "Historical equity curve removed: portfolio NLV can reflect deposits and withdrawals. "
+    "The dashboard applies built-in return-cleaning assumptions and focuses on the realized return stream used for Monte Carlo."
 )
 
 excluded_count = int((~return_frame["used_in_mc"]).sum())
@@ -862,7 +860,8 @@ with st.expander("Return stream used for Monte Carlo", expanded=False):
 st.subheader("Monte Carlo Projections Based on Actual Returns")
 st.markdown(
     "The projection resamples the cleaned actual historical daily return stream with replacement. "
-    "No sit-out adjustment is applied. For broker balance-history exports, cash-flow days and the following trading day are excluded by default to avoid accounting artifacts."
+    "No sit-out adjustment is applied. Return-cleaning assumptions are built in: weekdays only, no zero-return days, "
+    "and broker cash-flow days plus the following trading day are excluded to avoid accounting artifacts."
 )
 
 try:
